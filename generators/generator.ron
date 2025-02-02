@@ -1,0 +1,23 @@
+(
+    default_size: Some((300, 100)),
+    modifiers:[
+        {Fill: "ground" },
+
+
+        {External: ("rough_lakes.ron") },
+        {External: ("rough_rivers.ron") },
+        {External: ("finalize_water.ron") },
+
+        {Rooms: (count: "10", max_overlaps: "5", width: "d10..30", height: "d10..20", floor: "stone_floor", walls: "stone_floor")},
+        {Cellular: (if_ty: "stone_floor", neighbor_not_ty: ["wall", "stone_floor"], threshold: "1", new_ty: "wall")},
+
+        {Replace: ("dirt", "grass"), tile_prob:"0.0..1.0" },
+
+
+        {Replace: ("water", "shallow_water")},
+        {Cellular: (if_ty: "shallow_water", neighbor_ty: ["shallow_water"], threshold: "8", new_ty: "deep_water"), },
+
+        {Replace: ("ground", "grass")},
+        {Scatter: ("1..30", "tree"), only_on_ty: Some("grass") },
+     ]
+)

@@ -1,0 +1,11 @@
+(
+    modifiers:[
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "3", new_ty: "water") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "3", new_ty: "water") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "8", new_ty: "water") },
+
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "1", new_ty: "sand") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["sand"], threshold: "1", new_ty: "sand"), tile_prob: "0.3" },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["sand"], threshold: "5", new_ty: "sand"), },
+    ]
+)

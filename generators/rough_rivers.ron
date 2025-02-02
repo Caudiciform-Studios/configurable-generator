@@ -1,0 +1,8 @@
+(
+    modifiers:[
+        {Worm: (starting_ty: "water", len: "300", trail: "river", steering_strength: "0.01..0.05"), iterations: "0..5" },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["river"], threshold: "1", new_ty: "river") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["river"], threshold: "1", new_ty: "river"), tile_prob: "0.1", iterations:"3" },
+        {Replace: ("river", "water")},
+    ]
+)

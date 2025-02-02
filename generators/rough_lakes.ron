@@ -1,0 +1,11 @@
+(
+    modifiers:[
+        {Scatter: ("1..30", "water") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "1", new_ty: "water") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "1", new_ty: "water"), tile_prob: "0.5", iterations:"10" },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "1", new_ty: "water"), tile_prob: "0.1", iterations: "10" },
+
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "1", new_ty: "water") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["water"], threshold: "6", new_ty: "water"), iterations:"5"},
+    ]
+)
