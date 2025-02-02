@@ -1,13 +1,13 @@
 [package]
-name = "configurable_generator"
+name = "example"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-anyhow = "1"
-lazy-regex = "3"
-noise = "0.9"
-rand = { version = "0.9", features = ["small_rng"]}
-ron = "0.8"
-serde = {version = "1", features = ["derive"]}
 
+[dependencies]
+hotwatch = "0.5"
+image = "0.25"
+rand = { version = "0.9", features = ["small_rng"]}
+serde = {version = "1", features = ["derive"]}
+ron = "0.8"
+configurable_generator.path = ".."
