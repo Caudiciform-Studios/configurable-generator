@@ -19,11 +19,11 @@ impl Seed {
     }
 
     pub fn fork(&mut self) -> Self {
-        Self(SmallRng::from_rng(&mut self.0))
+        Self(SmallRng::from_rng(&mut self.0).unwrap())
     }
 
     pub fn to_u64(mut self) -> u64 {
-        self.0.random()
+        self.0.gen()
     }
 
     pub fn to_rng(self) -> SmallRng {
@@ -35,7 +35,7 @@ impl Seed {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Generator {
     #[serde(default)]
-    pub default_size: Option<(u32, u32)>,
+    pub default_size: Option<(Value, Value)>,
     pub modifiers: Vec<Modifier>
 }
 
@@ -51,6 +51,19 @@ impl Generator {
         Ok((generator, paths))
     }
 
+    pub fn from_str(data: &str) -> Result<Self> {
+        let generator = ron::from_str(data)?;
+        Ok(generator)
+    }
+
+    pub fn load_dependencies(&mut self, files: &HashMap<String, String>) -> Result<Vec<String>> {
+        let mut paths = vec![];
+        for modifier in &mut self.modifiers {
+            paths.extend(modifier.load_from_strs(files)?);
+        }
+        Ok(paths)
+    }
+
     pub fn generate(&self, width: usize, height: usize, ctx: &mut Ctx) -> TileMap {
         let mut tilemap = TileMap::new(width, height);
 
@@ -63,15 +76,21 @@ impl Generator {
     }
 
     pub fn solidify(&mut self, rng: &mut impl Rng ) -> Ctx {
-        let mut rng = SmallRng::from_rng(rng);
+        let mut rng = SmallRng::from_rng(rng).unwrap();
 
-        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.random::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923));
+        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.gen::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923));
         let mut ctx = Ctx {
             rng,
             noise,
             string_table: Default::default(),
             reverse_string_table: Default::default(),
         };
+
+        if let Some((w, h)) = &mut self.default_size {
+            w.solidify(&mut ctx);
+            h.solidify(&mut ctx);
+        }
+
         for modifier in &mut self.modifiers {
             modifier.solidify(&mut ctx);
         }
@@ -138,7 +157,7 @@ impl TileMap {
         }
     }
 
-    fn tiles_mut(&mut self) -> impl Iterator<Item = ((u32, u32), &mut u32)> {
+    pub fn tiles_mut(&mut self) -> impl Iterator<Item = ((u32, u32), &mut u32)> {
         self.tiles.iter_mut().enumerate().map(|(i,t)| {
             let x = (i % self.width) as u32;
             let y = (i / self.width) as u32;
@@ -146,7 +165,7 @@ impl TileMap {
         })
     }
 
-    fn tiles(&self) -> impl Iterator<Item = ((u32, u32), &u32)> {
+    pub fn tiles(&self) -> impl Iterator<Item = ((u32, u32), &u32)> {
         self.tiles.iter().enumerate().map(|(i,t)| {
             let x = (i % self.width) as u32;
             let y = (i / self.width) as u32;
@@ -164,8 +183,9 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn fork_rng(&mut self) -> SmallRng {
-        SmallRng::from_rng(&mut self.rng)
+        SmallRng::from_rng(&mut self.rng).unwrap()
     }
+
     pub fn tile_name_to_u32(&mut self, ty: &str) -> u32 {
         if let Some(id) = self.string_table.get(ty) {
             *id
@@ -174,6 +194,14 @@ impl Ctx {
             self.string_table.insert(ty.to_string(), id);
             self.reverse_string_table.insert(id, ty.to_string());
             id
+        }
+    }
+
+    pub fn u32_to_tile_name(&mut self, ty: u32) -> &str {
+        if let Some(name) = self.reverse_string_table.get(&ty) {
+            name
+        } else {
+            "undefined"
         }
     }
 }
@@ -200,7 +228,7 @@ fn iterations_default() -> Value { Value::Const(1.0) }
 
 impl CommonParams {
     fn skip_modifier(&self, ctx: &mut Ctx) -> bool {
-        self.prob.val(&mut ctx.rng) < 1.0 && ctx.rng.random::<f64>() > self.prob.val(&mut ctx.rng)
+        self.prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.prob.val(&mut ctx.rng)
     }
 
     fn skip_tile(&self, x: u32, y: u32, tilemap: &TileMap, ctx: &mut Ctx) -> bool {
@@ -216,7 +244,7 @@ impl CommonParams {
                 return true
             }
         }
-        if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.random::<f64>() > self.tile_prob.val(&mut ctx.rng) {
+        if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng) {
             return true
         }
         if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.noise.get([x as f64,y as f64]) < self.noise_threshold.val(&mut ctx.rng) {
@@ -264,6 +292,10 @@ impl Modifier {
     fn load(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
         self.logic.logic_mut().load(base_path)
     }
+
+    fn load_from_strs(&mut self, strs: &HashMap<String, String>) -> Result<Vec<String>> {
+        self.logic.logic_mut().load_from_strs(strs)
+    }
 }
 
 macro_rules! modifier_logic {
@@ -309,6 +341,7 @@ pub trait ModifierImpl {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx);
     fn solidify(&mut self, _ctx: &mut Ctx) { }
     fn load(&mut self, _base_path: &Path) -> Result<Vec<PathBuf>> { Ok(vec![]) }
+    fn load_from_strs(&mut self, _strs: &HashMap<String,String>) -> Result<Vec<String>> { Ok(vec![]) }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -366,7 +399,7 @@ impl ModifierImpl for Scatter {
         let mut rng = ctx.fork_rng();
         for _ in 0..self.0.val(&mut ctx.rng).max(0.0) as u32 {
             loop {
-                let idx = rng.random_range(0..tilemap.tiles.len());
+                let idx = rng.gen_range(0..tilemap.tiles.len());
                 let x = idx % tilemap.width;
                 let y = idx / tilemap.width;
                 if !common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
@@ -419,8 +452,12 @@ impl ModifierImpl for Cellular {
                             if !self.neighbor_not_ty.is_empty() && self.neighbor_not_ty.iter().all(|ty| tilemap.tiles[j] != ty.as_packed()) {
                                 count += 1;
                             }
+                        } else if !self.neighbor_not_ty.is_empty() {
+                            count += 1;
                         }
                     }
+                } else if !self.neighbor_not_ty.is_empty() {
+                    count += 1;
                 }
             }
 
@@ -511,14 +548,14 @@ pub struct Worm {
 
 impl ModifierImpl for Worm {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        let mut current = ctx.rng.random_range(0..tilemap.tiles.len());
+        let mut current = ctx.rng.gen_range(0..tilemap.tiles.len());
         let mut tries = 100;
         while self.starting_ty.as_packed() != tilemap.tiles[current] || common_params.skip_tile((current%tilemap.width) as u32, (current/tilemap.width) as u32, tilemap, ctx) {
             tries -= 1;
             if tries <= 0 {
                 return
             }
-            current = ctx.rng.random_range(0..tilemap.tiles.len());
+            current = ctx.rng.gen_range(0..tilemap.tiles.len());
         }
         let mut current_x = (current % tilemap.width) as f64;
         let mut current_y = (current / tilemap.width) as f64;
@@ -578,6 +615,25 @@ impl ModifierImpl for External {
         self.1 = Some(generator.modifiers);
         Ok(paths)
     }
+
+    fn load_from_strs(&mut self, strs: &HashMap<String,String>) -> Result<Vec<String>> {
+        if let Some(modifiers) = &mut self.1 {
+            let mut paths = vec![];
+            for modifier in modifiers {
+                paths.extend(modifier.load_from_strs(strs)?);
+            }
+            Ok(paths)
+        } else {
+            if let Some(data) = strs.get(&self.0) {
+                let mut generator = Generator::from_str(data)?;
+                let paths = generator.load_dependencies(strs)?;
+                self.1 = Some(generator.modifiers);
+                Ok(paths)
+            } else {
+                Ok(vec![self.0.clone()])
+            }
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -600,8 +656,8 @@ impl ModifierImpl for Rooms {
             'retry: for _ in 0..200 {
                 let width = self.width.val(&mut ctx.rng).max(0.0) as u32;
                 let height = self.height.val(&mut ctx.rng).max(0.0) as u32;
-                let x = ctx.rng.random_range(0..tilemap.width as u32-width);
-                let y = ctx.rng.random_range(0..tilemap.height as u32-height);
+                let x = ctx.rng.gen_range(0..tilemap.width as u32-width);
+                let y = ctx.rng.gen_range(0..tilemap.height as u32-height);
                 let mut new_overlaps = 0;
                 for (rx,ry,rw,rh) in &rooms {
                     if *rx < x+width && rx+rw >= x && *ry < y+height && ry+rh >= y {
