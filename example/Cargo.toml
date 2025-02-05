@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 hotwatch = "0.5"
 image = "0.25"
-rand = { version = "0.9", features = ["small_rng"]}
+rand = { version = "0.8.5", features = ["small_rng"]}
 serde = {version = "1", features = ["derive"]}
 ron = "0.8"
 configurable_generator.path = ".."

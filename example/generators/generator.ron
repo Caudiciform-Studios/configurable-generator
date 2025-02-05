@@ -1,5 +1,5 @@
 (
-    default_size: Some((300, 100)),
+    default_size: Some(("300", "100")),
     modifiers:[
         {Fill: "ground" },
 

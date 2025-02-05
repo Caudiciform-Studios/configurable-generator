@@ -10,7 +10,7 @@ use rand::prelude::*;
 use image::{imageops::{resize, FilterType}, RgbImage};
 use serde::{Serialize, Deserialize};
 
-use configurable_generator::{Generator, TileMap, Ctx};
+use configurable_generator::{Generator, TileMap, Ctx, Value};
 
 #[derive(Serialize, Deserialize)]
 struct Palette(HashMap<String, [u8;3]>);
@@ -96,7 +96,7 @@ fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap, Ctx) {
     let seed = if let Some(seed) = input_seed {
         seed
     } else {
-        rand::rng().random()
+        rand::thread_rng().gen()
     };
 
     let mut rng = SmallRng::seed_from_u64(seed);
@@ -105,9 +105,9 @@ fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap, Ctx) {
     let size = if let Some(size) = generator.default_size {
         size
     } else {
-        (300, 100)
+        (Value::Const(300.0), Value::Const(100.0))
     };
-    let map = generator.generate(size.0 as usize, size.1 as usize, &mut ctx);
+    let map = generator.generate(size.0.val(&mut ctx.rng).max(0.0) as usize, size.1.val(&mut ctx.rng).max(0.0) as usize, &mut ctx);
     (map, ctx)
 }
 

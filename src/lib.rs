@@ -84,6 +84,7 @@ impl Generator {
             noise,
             string_table: Default::default(),
             reverse_string_table: Default::default(),
+            current_activations: 0,
         };
 
         if let Some((w, h)) = &mut self.default_size {
@@ -175,10 +176,11 @@ impl TileMap {
 }
 
 pub struct Ctx {
-    rng: SmallRng,
+    pub rng: SmallRng,
     noise: Box<dyn NoiseFn<f64, 2>>,
     pub string_table: HashMap<String, u32>,
     pub reverse_string_table: HashMap<u32, String>,
+    current_activations: u32,
 }
 
 impl Ctx {
@@ -204,6 +206,14 @@ impl Ctx {
             "undefined"
         }
     }
+
+    fn tile_set(&mut self) {
+        self.current_activations += 1;
+    }
+
+    fn modifier_finished(&mut self) {
+        self.current_activations = 0;
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -216,6 +226,8 @@ pub struct CommonParams {
     noise_threshold: Value,
     #[serde(default="iterations_default")]
     iterations: Value,
+    #[serde(default)]
+    max_activations: Option<Value>,
     #[serde(default)]
     skip_ty: Option<TileType>,
     #[serde(default)]
@@ -232,6 +244,11 @@ impl CommonParams {
     }
 
     fn skip_tile(&self, x: u32, y: u32, tilemap: &TileMap, ctx: &mut Ctx) -> bool {
+        if let Some(max) = &self.max_activations {
+            if ctx.current_activations as f64 >= max.val(&mut ctx.rng) {
+                return true
+            }
+        }
         if let Some(ty) = &self.skip_ty {
             let i = y as usize * tilemap.width + x as usize;
             if tilemap.tiles[i] == ty.as_packed() {
@@ -282,6 +299,7 @@ impl Modifier {
                 self.logic.logic().apply(tilemap, &self.common_params, ctx);
             }
         }
+        ctx.modifier_finished();
     }
 
     fn solidify(&mut self, ctx: &mut Ctx) {
@@ -356,6 +374,7 @@ impl ModifierImpl for Fill {
                 continue
             }
             tilemap.tiles[i] = self.0.as_packed();
+            ctx.tile_set();
         }
     }
 
@@ -378,6 +397,7 @@ impl ModifierImpl for Choice {
             }
             if let Some(t) = self.0.choose(&mut rng).cloned().flatten() {
                 tilemap.tiles[i] = t.as_packed();
+                ctx.tile_set();
             }
         }
     }
@@ -404,6 +424,7 @@ impl ModifierImpl for Scatter {
                 let y = idx / tilemap.width;
                 if !common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
                     tilemap.tiles[idx] = self.1.as_packed();
+                    ctx.tile_set();
                     break
                 }
             }
@@ -464,6 +485,7 @@ impl ModifierImpl for Cellular {
             if count as f64 >= self.threshold.val(&mut ctx.rng) {
                 let i = y as usize * tilemap.width + x as usize;
                 changed.push((i, self.new_ty.clone()));
+                ctx.tile_set();
             }
         }
 
@@ -500,6 +522,7 @@ impl ModifierImpl for Grid {
                 }
                 let i = y * tilemap.width + x;
                 tilemap.tiles[i] = self.tile.as_packed();
+                ctx.tile_set();
             }
         }
     }
@@ -524,6 +547,7 @@ impl ModifierImpl for Replace {
             }
             if tilemap.tiles[i] == self.0.as_packed() {
                 tilemap.tiles[i] = self.1.as_packed();
+                ctx.tile_set();
             }
         }
     }
@@ -570,6 +594,7 @@ impl ModifierImpl for Worm {
                 current_y = next_y;
             }
             tilemap.tiles[current_y as usize * tilemap.width + current_x as usize] = self.trail.as_packed();
+            ctx.tile_set();
             a += ctx.noise.get([current_x + len as f64,current_y + len as f64]) * std::f64::consts::TAU * self.steering_strength.val(&mut ctx.rng);
         }
     }
@@ -676,9 +701,11 @@ impl ModifierImpl for Rooms {
                             if tx == x || ty == y || tx == x+width-1 || ty == y+height-1 {
                                 if tilemap.tiles[i] != self.floor.as_packed() {
                                     tilemap.tiles[i] = self.walls.as_packed();
+                                    ctx.tile_set();
                                 }
                             } else {
                                 tilemap.tiles[i] = self.floor.as_packed();
+                                ctx.tile_set();
                             }
                         }
                     }
