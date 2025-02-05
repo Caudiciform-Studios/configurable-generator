@@ -147,6 +147,7 @@ pub struct TileMap {
     pub height: usize,
     pub width: usize,
     pub tiles: Vec<u32>,
+    pub tags: HashSet<u32>,
 }
 
 impl TileMap {
@@ -155,6 +156,7 @@ impl TileMap {
             width,
             height,
             tiles: vec![u32::MAX; width*height],
+            tags: HashSet::new(),
         }
     }
 
@@ -232,6 +234,10 @@ pub struct CommonParams {
     skip_ty: Option<TileType>,
     #[serde(default)]
     only_on_ty: Option<TileType>,
+    #[serde(default)]
+    if_level_tag: Option<Tag>,
+    #[serde(default)]
+    if_not_level_tag: Option<Tag>,
 }
 fn prob_default() -> Value { Value::Const(1.0) }
 fn tile_prob_default() -> Value { Value::Const(1.0) }
@@ -239,7 +245,17 @@ fn noise_threshold_default() -> Value { Value::Const(f64::NEG_INFINITY) }
 fn iterations_default() -> Value { Value::Const(1.0) }
 
 impl CommonParams {
-    fn skip_modifier(&self, ctx: &mut Ctx) -> bool {
+    fn skip_modifier(&self, ctx: &mut Ctx, tilemap: &TileMap) -> bool {
+        if let Some(tag) = &self.if_level_tag {
+            if !tilemap.tags.contains(&tag.as_packed()) {
+               return true
+            }
+        }
+        if let Some(tag) = &self.if_not_level_tag {
+            if tilemap.tags.contains(&tag.as_packed()) {
+               return true
+            }
+        }
         self.prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.prob.val(&mut ctx.rng)
     }
 
@@ -281,6 +297,12 @@ impl CommonParams {
         if let Some(ty) = &mut self.only_on_ty {
             ty.solidify(ctx);
         }
+        if let Some(ty) = &mut self.if_level_tag {
+            ty.solidify(ctx);
+        }
+        if let Some(ty) = &mut self.if_not_level_tag {
+            ty.solidify(ctx);
+        }
     }
 }
 
@@ -294,7 +316,7 @@ pub struct Modifier {
 
 impl Modifier {
     fn apply(&self, tilemap: &mut TileMap, ctx: &mut Ctx) {
-        if !self.common_params.skip_modifier(ctx) {
+        if !self.common_params.skip_modifier(ctx, tilemap) {
             for _ in 0..self.common_params.iterations.val(&mut ctx.rng).max(0.0) as u32 {
                 self.logic.logic().apply(tilemap, &self.common_params, ctx);
             }
@@ -352,6 +374,8 @@ modifier_logic! {
     Worm,
     External,
     Rooms,
+    SetTag,
+    IfTag,
     Grid
 }
 
@@ -380,6 +404,50 @@ impl ModifierImpl for Fill {
 
     fn solidify(&mut self, ctx: &mut Ctx) {
         self.0.solidify(ctx);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetTag(Tag);
+
+impl ModifierImpl for SetTag {
+    fn apply(&self, tilemap: &mut TileMap, _common_params: &CommonParams, _ctx: &mut Ctx) {
+        tilemap.tags.insert(self.0.as_packed());
+    }
+
+    fn solidify(&mut self, ctx: &mut Ctx) {
+        self.0.solidify(ctx);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct IfTag {
+    tag: Tag,
+    #[serde(default)]
+    invert: bool,
+    inner: Vec<Modifier>,
+}
+
+impl ModifierImpl for IfTag {
+    fn apply(&self, tilemap: &mut TileMap, _common_params: &CommonParams, ctx: &mut Ctx) {
+        let run = if tilemap.tags.contains(&self.tag.as_packed()) {
+            !self.invert
+        } else {
+            self.invert
+        };
+
+        if run {
+            for m in &self.inner {
+                m.apply(tilemap, ctx);
+            }
+        }
+    }
+
+    fn solidify(&mut self, ctx: &mut Ctx) {
+        self.tag.solidify(ctx);
+        for m in &mut self.inner {
+            m.solidify(ctx);
+        }
     }
 }
 
