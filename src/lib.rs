@@ -376,6 +376,7 @@ modifier_logic! {
     Rooms,
     SetTag,
     IfTag,
+    FloodRegion,
     Grid
 }
 
@@ -443,6 +444,22 @@ impl ModifierImpl for IfTag {
         }
     }
 
+    fn load(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
+        let mut paths = vec![];
+        for m in &mut self.inner {
+            paths.extend(m.load(base_path)?);
+        }
+        Ok(paths)
+    }
+
+    fn load_from_strs(&mut self, strs: &HashMap<String,String>) -> Result<Vec<String>> {
+        let mut paths = vec![];
+        for m in &mut self.inner {
+            paths.extend(m.load_from_strs(strs)?);
+        }
+        Ok(paths)
+    }
+
     fn solidify(&mut self, ctx: &mut Ctx) {
         self.tag.solidify(ctx);
         for m in &mut self.inner {
@@ -507,7 +524,10 @@ impl ModifierImpl for Scatter {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Cellular {
-    if_ty: TileType,
+    #[serde(default)]
+    if_ty: Option<TileType>,
+    #[serde(default)]
+    if_not_ty: Option<TileType>,
     #[serde(default)]
     neighbor_ty: Vec<TileType>,
     #[serde(default)]
@@ -520,9 +540,18 @@ fn live_threshold_default() -> Value { Value::Range(0.0, 8.0) }
 
 impl ModifierImpl for Cellular {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+        if self.if_ty.is_none() && self.if_not_ty.is_none() {
+            return
+        }
         let mut changed = Vec::with_capacity(200);
         for ((x,y), tile) in tilemap.tiles() {
-            if *tile != self.if_ty.as_packed() || self.threshold.val(&mut ctx.rng) > 8.0 || common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
+            let check = if let Some(ty) = &self.if_ty {
+                *tile != ty.as_packed()
+            } else {
+                let ty = self.if_not_ty.as_ref().unwrap();
+                *tile == ty.as_packed()
+            };
+            if check || self.threshold.val(&mut ctx.rng) > 8.0 || common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
                 continue
             }
             let x = x as i32;
@@ -564,7 +593,12 @@ impl ModifierImpl for Cellular {
 
     fn solidify(&mut self, ctx: &mut Ctx) {
         self.threshold.solidify(ctx);
-        self.if_ty.solidify(ctx);
+        if let Some(ty) = &mut self.if_ty {
+            ty.solidify(ctx);
+        }
+        if let Some(ty) = &mut self.if_not_ty {
+            ty.solidify(ctx);
+        }
         for ty in &mut self.neighbor_ty {
             ty.solidify(ctx);
         }
@@ -607,7 +641,9 @@ pub struct Replace(TileType, TileType);
 
 impl ModifierImpl for Replace {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        for i in 0..tilemap.tiles.len() {
+        let mut idxs = (0..tilemap.tiles.len()).collect::<Vec<_>>();
+        idxs.shuffle(&mut ctx.rng);
+        for i in idxs {
             let x = i / tilemap.width;
             let y = i % tilemap.width;
             if common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
@@ -790,5 +826,85 @@ impl ModifierImpl for Rooms {
         self.floor.solidify(ctx);
         self.walls.solidify(ctx);
         self.max_overlaps.solidify(ctx);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FloodRegion {
+    with: TileType,
+    bounded_by: TileType,
+    #[serde(default)]
+    unless_contains: Option<TileType>,
+    #[serde(default)]
+    if_contains: Option<TileType>,
+}
+impl ModifierImpl for FloodRegion {
+    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+        let boundry = self.bounded_by.as_packed();
+        let mut tiles = if let Some(seed) = &self.unless_contains {
+            let seed = seed.as_packed();
+            tilemap.tiles.iter().map(|t| if *t == boundry { u32::MAX } else if *t == seed { 1 } else { 0 } ).collect::<Vec<_>>()
+        } else if let Some(seed) = &self.if_contains {
+            let seed = seed.as_packed();
+            tilemap.tiles.iter().map(|t| if *t == boundry { u32::MAX } else if *t == seed { 1 } else { 0 } ).collect::<Vec<_>>()
+        } else {
+            return
+        };
+
+        let mut did_work = true;
+        while did_work {
+            did_work = false;
+            'outer: for i in 0..tiles.len() {
+                if tiles[i] == 0 {
+                    let x = (i % tilemap.width) as i32;
+                    let y = (i / tilemap.width) as i32;
+                    for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)] {
+                        let xx = x + dx;
+                        let yy = y + dy;
+                        if xx < 0 || xx >= tilemap.width as i32 || yy < 0 || yy >= tilemap.height as i32 {
+                            continue;
+                        }
+                        let j = yy as usize * tilemap.width + xx as usize;
+                        if 0 < tiles[j] && tiles[j] < u32::MAX {
+                            tiles[i] = tiles[j];
+                            did_work = true;
+                            continue 'outer
+                        }
+                    }
+                }
+            }
+        }
+
+        let target = self.with.as_packed();
+        for (i, v) in tiles.iter().enumerate() {
+            let x = i % tilemap.width;
+            let y = i / tilemap.width;
+            if self.unless_contains.is_none() {
+                if 0 < *v && tiles[i] < u32::MAX {
+                    if !common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
+                        tilemap.tiles[i] = target;
+                        ctx.tile_set();
+                    }
+                }
+            } else {
+                if 0  == *v {
+                    if !common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
+                        tilemap.tiles[i] = target;
+                        ctx.tile_set();
+                    }
+                }
+            }
+        }
+    }
+
+    fn solidify(&mut self, ctx: &mut Ctx) {
+        self.with.solidify(ctx);
+        self.bounded_by.solidify(ctx);
+        if let Some(v) = &mut self.unless_contains {
+            v.solidify(ctx);
+        }
+        if let Some(v) = &mut self.if_contains {
+            v.solidify(ctx);
+        }
     }
 }
