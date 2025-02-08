@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     collections::{HashSet, HashMap},
+    hash::{DefaultHasher, Hash, Hasher},
 };
 
 use anyhow::{Result, Context};
@@ -124,30 +125,31 @@ type Tag = StringId;
 #[serde(untagged)]
 pub enum StringId {
     Display(String),
-    Packed(u32)
+    Packed(u64)
 }
 
 impl StringId {
     fn solidify(&mut self, ctx: &mut Ctx) {
         if let StringId::Display(s) = self {
-            *self = StringId::Packed(ctx.tile_name_to_u32(s));
+            *self = StringId::Packed(ctx.tile_name_to_u64(s));
         }
     }
 
-    fn as_packed(&self) -> u32 {
+    fn as_packed(&self) -> u64 {
         match self {
-            Self::Display(_) => u32::MAX,
+            Self::Display(_) => u64::MAX,
             Self::Packed(v) => *v,
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct TileMap {
     pub height: usize,
     pub width: usize,
-    pub tiles: Vec<u32>,
-    pub tags: HashSet<u32>,
+    pub tiles: Vec<u64>,
+    pub tile_tags: Vec<HashSet<u64>>,
+    pub tags: HashSet<u64>,
 }
 
 impl TileMap {
@@ -155,12 +157,13 @@ impl TileMap {
         Self {
             width,
             height,
-            tiles: vec![u32::MAX; width*height],
+            tiles: vec![u64::MAX; width*height],
+            tile_tags: vec![HashSet::new(); width*height],
             tags: HashSet::new(),
         }
     }
 
-    pub fn tiles_mut(&mut self) -> impl Iterator<Item = ((u32, u32), &mut u32)> {
+    pub fn tiles_mut(&mut self) -> impl Iterator<Item = ((u32, u32), &mut u64)> {
         self.tiles.iter_mut().enumerate().map(|(i,t)| {
             let x = (i % self.width) as u32;
             let y = (i / self.width) as u32;
@@ -168,20 +171,45 @@ impl TileMap {
         })
     }
 
-    pub fn tiles(&self) -> impl Iterator<Item = ((u32, u32), &u32)> {
+    pub fn tiles(&self) -> impl Iterator<Item = ((u32, u32), &u64)> {
         self.tiles.iter().enumerate().map(|(i,t)| {
             let x = (i % self.width) as u32;
             let y = (i / self.width) as u32;
             ((x,y), t)
         })
     }
+
+    pub fn set_tile(&mut self, x: i32, y: i32, ty: &TileType, ctx: &mut Ctx, common_params: &CommonParams) -> bool {
+        if x >= 0 && y >= 0 {
+            let i = y as usize * self.width + x as usize;
+            self.set_tile_by_idx(i, ty, ctx, common_params)
+        } else {
+            false
+        }
+    }
+
+    pub fn set_tile_by_idx(&mut self, idx: usize, ty: &TileType, ctx: &mut Ctx, common_params: &CommonParams) -> bool {
+        let x = idx % self.width;
+        let y = idx / self.width;
+        if x >= self.width || y >= self.height {
+            return false
+        }
+        if !common_params.skip_tile(x as u32, y as u32, self, ctx) {
+            self.tiles[idx] = ty.as_packed();
+            self.tile_tags[idx].extend(common_params.tile_tags.iter().map(|t| t.as_packed()));
+            ctx.tile_set();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub struct Ctx {
     pub rng: SmallRng,
     noise: Box<dyn NoiseFn<f64, 2>>,
-    pub string_table: HashMap<String, u32>,
-    pub reverse_string_table: HashMap<u32, String>,
+    pub string_table: HashMap<String, u64>,
+    pub reverse_string_table: HashMap<u64, String>,
     current_activations: u32,
 }
 
@@ -190,18 +218,20 @@ impl Ctx {
         SmallRng::from_rng(&mut self.rng).unwrap()
     }
 
-    pub fn tile_name_to_u32(&mut self, ty: &str) -> u32 {
+    pub fn tile_name_to_u64(&mut self, ty: &str) -> u64 {
         if let Some(id) = self.string_table.get(ty) {
             *id
         } else {
-            let id = self.string_table.len() as u32;
+            let mut s = DefaultHasher::new();
+            ty.hash(&mut s);
+            let id = s.finish();
             self.string_table.insert(ty.to_string(), id);
             self.reverse_string_table.insert(id, ty.to_string());
             id
         }
     }
 
-    pub fn u32_to_tile_name(&mut self, ty: u32) -> &str {
+    pub fn u64_to_tile_name(&mut self, ty: u64) -> &str {
         if let Some(name) = self.reverse_string_table.get(&ty) {
             name
         } else {
@@ -222,6 +252,8 @@ impl Ctx {
 pub struct CommonParams {
     #[serde(default="tile_prob_default")]
     tile_prob: Value,
+    #[serde(default)]
+    tile_tags: Vec<Tag>,
     #[serde(default="prob_default")]
     prob: Value,
     #[serde(default="noise_threshold_default")]
@@ -302,6 +334,9 @@ impl CommonParams {
         }
         if let Some(ty) = &mut self.if_not_level_tag {
             ty.solidify(ctx);
+        }
+        for tag in &mut self.tile_tags {
+            tag.solidify(ctx);
         }
     }
 }
@@ -393,13 +428,7 @@ pub struct Fill(TileType);
 impl ModifierImpl for Fill {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
         for i in 0..tilemap.tiles.len() {
-            let x = i % tilemap.width;
-            let y = i / tilemap.width;
-            if common_params.skip_tile(x as u32,y as u32, tilemap, ctx){
-                continue
-            }
-            tilemap.tiles[i] = self.0.as_packed();
-            ctx.tile_set();
+            tilemap.set_tile_by_idx(i, &self.0, ctx, common_params);
         }
     }
 
@@ -475,14 +504,8 @@ impl ModifierImpl for Choice {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
         let mut rng = ctx.fork_rng();
         for i in 0..tilemap.tiles.len() {
-            let x = i % tilemap.width;
-            let y = i / tilemap.width;
-            if common_params.skip_tile(x as u32,y as u32, tilemap, ctx){
-                continue
-            }
-            if let Some(t) = self.0.choose(&mut rng).cloned().flatten() {
-                tilemap.tiles[i] = t.as_packed();
-                ctx.tile_set();
+            if let Some(t) = self.0.choose(&mut rng).map(|t| t.as_ref()).flatten() {
+                tilemap.set_tile_by_idx(i, t, ctx, common_params);
             }
         }
     }
@@ -505,11 +528,7 @@ impl ModifierImpl for Scatter {
         for _ in 0..self.0.val(&mut ctx.rng).max(0.0) as u32 {
             loop {
                 let idx = rng.gen_range(0..tilemap.tiles.len());
-                let x = idx % tilemap.width;
-                let y = idx / tilemap.width;
-                if !common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
-                    tilemap.tiles[idx] = self.1.as_packed();
-                    ctx.tile_set();
+                if tilemap.set_tile_by_idx(idx, &self.1, ctx, common_params) {
                     break
                 }
             }
@@ -551,7 +570,7 @@ impl ModifierImpl for Cellular {
                 let ty = self.if_not_ty.as_ref().unwrap();
                 *tile == ty.as_packed()
             };
-            if check || self.threshold.val(&mut ctx.rng) > 8.0 || common_params.skip_tile(x as u32, y as u32, tilemap, ctx) {
+            if check || self.threshold.val(&mut ctx.rng) > 8.0 {
                 continue
             }
             let x = x as i32;
@@ -582,12 +601,11 @@ impl ModifierImpl for Cellular {
             if count as f64 >= self.threshold.val(&mut ctx.rng) {
                 let i = y as usize * tilemap.width + x as usize;
                 changed.push((i, self.new_ty.clone()));
-                ctx.tile_set();
             }
         }
 
         for (i, ty) in changed {
-            tilemap.tiles[i] = ty.as_packed();
+            tilemap.set_tile_by_idx(i, &ty, ctx, common_params);
         }
     }
 
@@ -619,12 +637,7 @@ impl ModifierImpl for Grid {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
         for x in (0..tilemap.width).step_by(self.spacing.0.val(&mut ctx.rng).max(0.0) as usize) {
             for y in (0..tilemap.height).step_by(self.spacing.1.val(&mut ctx.rng).max(0.0) as usize) {
-                if common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
-                    continue
-                }
-                let i = y * tilemap.width + x;
-                tilemap.tiles[i] = self.tile.as_packed();
-                ctx.tile_set();
+                tilemap.set_tile(x as i32, y as i32, &self.tile, ctx, common_params);
             }
         }
     }
@@ -644,14 +657,8 @@ impl ModifierImpl for Replace {
         let mut idxs = (0..tilemap.tiles.len()).collect::<Vec<_>>();
         idxs.shuffle(&mut ctx.rng);
         for i in idxs {
-            let x = i / tilemap.width;
-            let y = i % tilemap.width;
-            if common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
-                continue
-            }
             if tilemap.tiles[i] == self.0.as_packed() {
-                tilemap.tiles[i] = self.1.as_packed();
-                ctx.tile_set();
+                tilemap.set_tile_by_idx(i, &self.1, ctx, common_params);
             }
         }
     }
@@ -676,6 +683,7 @@ pub struct Worm {
 
 impl ModifierImpl for Worm {
     fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+        unimplemented!();
         let mut current = ctx.rng.gen_range(0..tilemap.tiles.len());
         let mut tries = 100;
         while self.starting_ty.as_packed() != tilemap.tiles[current] || common_params.skip_tile((current%tilemap.width) as u32, (current/tilemap.width) as u32, tilemap, ctx) {
@@ -800,17 +808,13 @@ impl ModifierImpl for Rooms {
                 overlaps += new_overlaps;
                 for tx in x..x+width {
                     for ty in y..y+height {
-                        if !common_params.skip_tile(tx,ty, tilemap, ctx) {
-                            let i = ty as usize * tilemap.width + tx as usize;
-                            if tx == x || ty == y || tx == x+width-1 || ty == y+height-1 {
-                                if tilemap.tiles[i] != self.floor.as_packed() {
-                                    tilemap.tiles[i] = self.walls.as_packed();
-                                    ctx.tile_set();
-                                }
-                            } else {
-                                tilemap.tiles[i] = self.floor.as_packed();
-                                ctx.tile_set();
+                        let i = ty as usize * tilemap.width + tx as usize;
+                        if tx == x || ty == y || tx == x+width-1 || ty == y+height-1 {
+                            if tilemap.tiles[i] != self.floor.as_packed() {
+                                tilemap.set_tile_by_idx(i, &self.walls, ctx, common_params);
                             }
+                        } else {
+                            tilemap.set_tile_by_idx(i, &self.floor, ctx, common_params);
                         }
                     }
                 }
@@ -875,23 +879,16 @@ impl ModifierImpl for FloodRegion {
             }
         }
 
-        let target = self.with.as_packed();
         for (i, v) in tiles.iter().enumerate() {
             let x = i % tilemap.width;
             let y = i / tilemap.width;
             if self.unless_contains.is_none() {
                 if 0 < *v && tiles[i] < u32::MAX {
-                    if !common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
-                        tilemap.tiles[i] = target;
-                        ctx.tile_set();
-                    }
+                    tilemap.set_tile_by_idx(i, &self.with, ctx, common_params);
                 }
             } else {
                 if 0  == *v {
-                    if !common_params.skip_tile(x as u32,y as u32, tilemap, ctx) {
-                        tilemap.tiles[i] = target;
-                        ctx.tile_set();
-                    }
+                    tilemap.set_tile_by_idx(i, &self.with, ctx, common_params);
                 }
             }
         }
