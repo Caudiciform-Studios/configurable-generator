@@ -200,14 +200,13 @@ impl <const N: usize> TileMap<N> {
         (0..self.tiles.len()).into_iter().map(move |i| index_to_point(TileMapIndex(i), &dimensions))
     }
 
-    pub fn neighboors(&self, idx: TileMapIndex, radius: u32) -> Vec<TileMapIndex> {
-        let mut points = HashSet::with_capacity(3*N-1);
-        points.insert(idx);
-        self.neighboors_at_dimension(0, idx, radius, &mut points);
-        points.into_iter().collect()
+    pub fn neighboors(&self, idx: TileMapIndex, radius: u32, points: &mut Vec<TileMapIndex>) {
+        points.clear();
+        points.push(idx);
+        self.neighboors_at_dimension(0, idx, radius, points);
     }
 
-    fn neighboors_at_dimension(&self, n: usize, idx: TileMapIndex, radius: u32, points: &mut HashSet<TileMapIndex>) {
+    fn neighboors_at_dimension(&self, n: usize, idx: TileMapIndex, radius: u32, points: &mut Vec<TileMapIndex>) {
         if n >= N {
             return
         }
@@ -218,7 +217,7 @@ impl <const N: usize> TileMap<N> {
                 let mut pp = p;
                 pp[n] = v as u32;
                 if let Some(j) = self.point_to_index(pp) {
-                    points.insert(j);
+                    points.push(j);
                     self.neighboors_at_dimension(n+1, j, radius, points);
                 }
             }
@@ -728,11 +727,7 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
         }
         let mut indices:Vec<_> = tilemap.indexes().collect();
         indices.shuffle(&mut ctx.rng);
-        #[cfg(not(feature = "parallel"))]
-        let iter = indices.into_iter();
-        #[cfg(feature = "parallel")]
-        let iter = indices.into_par_iter();
-        let changed:Vec<_> = iter.filter_map(|idx| {
+        let f = |neighboor_cache: &mut Vec<TileMapIndex>, idx| {
             let tile = tilemap.get_tile_by_idx(idx);
             let check = if let Some(ty) = &self.if_ty {
                 tile != ty.as_packed()
@@ -745,9 +740,10 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
             }
             let mut count = 0;
             let mut neighboor_count = 0;
-            for neighboor_idx in tilemap.neighboors(idx, 1) {
+            tilemap.neighboors(idx, 1, neighboor_cache);
+            for neighboor_idx in neighboor_cache.iter() {
                 neighboor_count += 1;
-                let neighboor = tilemap.get_tile_by_idx(neighboor_idx);
+                let neighboor = tilemap.get_tile_by_idx(*neighboor_idx);
                 if self.neighbor_ty.iter().any(|ty| neighboor == ty.as_packed()) {
                     count += 1;
                 }
@@ -765,7 +761,14 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
             } else {
                 None
             }
-        }).collect();
+        };
+        #[cfg(not(feature = "parallel"))]
+        let changed:Vec<_> = {
+            let mut neighboors_cache = Vec::with_capacity(3*N-1);
+            indices.into_iter().map(|idx| f(&mut neighboors_cache, idx)).collect()
+        };
+        #[cfg(feature = "parallel")]
+        let changed: Vec<_> = indices.into_par_iter().map_with(Vec::with_capacity(3*N-1), |neighboors_cache, idx| f(neighboors_cache, idx)).filter_map(|x| x).collect();
 
         for (idx, ty) in changed {
             tilemap.set_tile_by_idx(idx, &ty, ctx, common_params, &[]);
@@ -901,6 +904,7 @@ impl <const N: usize>ModifierImpl<N> for Worm {
         let mut a = [0; N].map(|_| ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng))) * std::f64::consts::TAU);
         let radius = self.radius.val(&mut ctx.rng).max(0.0);
         let radius_squared = radius.powi(2);
+        let mut neighboors_cache = Vec::with_capacity(3*N-1);
         while len > 0 && current_p.iter().enumerate().all(|(i, v)| *v >= 0.0 && (*v as usize) < tilemap.dimensions[i]) {
             len -= 1;
             let mut next_p = current_p;
@@ -921,10 +925,11 @@ impl <const N: usize>ModifierImpl<N> for Worm {
                         let mut a_tag = Tag::Display(format!("angle_{aa}"));
                         current_p = next_p;
                         a_tag.solidify(ctx);
-                        for p in tilemap.neighboors(next_idx, radius.ceil() as u32) {
-                            let n = tilemap.index_to_point(p);
+                        tilemap.neighboors(next_idx, radius.ceil() as u32, &mut neighboors_cache);
+                        for p in &neighboors_cache {
+                            let n = tilemap.index_to_point(*p);
                             if current_p.iter().zip(n.iter()).map(|(a,b)| (*b as f64- *a).powi(2)).into_iter().sum::<f64>() <= radius_squared {
-                                tilemap.set_tile_by_idx(p, &self.trail, ctx, common_params, &[a_tag.clone()]);
+                                tilemap.set_tile_by_idx(*p, &self.trail, ctx, common_params, &[a_tag.clone()]);
                             }
                         }
                     }
@@ -1086,12 +1091,15 @@ impl <const N: usize>ModifierImpl<N> for FloodRegion {
             return
         };
 
+        let mut neighboors_cache = Vec::with_capacity(3*N-1);
+
         let mut did_work = true;
         while did_work {
             did_work = false;
             'outer: for i in tilemap.indexes() {
                 if tiles[i.0] == 0 {
-                    for neighboor in tilemap.neighboors(i, 1) {
+                    tilemap.neighboors(i, 1, &mut neighboors_cache);
+                    for neighboor in &mut neighboors_cache {
                         if 0 < tiles[neighboor.0] && tiles[neighboor.0] < u32::MAX {
                             tiles[i.0] = tiles[neighboor.0];
                             did_work = true;

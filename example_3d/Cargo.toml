@@ -7,3 +7,6 @@ edition = "2021"
 configurable_generator.path = ".."
 rand = "=0.8.5"
 vox_writer = "0.1.9"
+
+[profile.release]
+debug=true
