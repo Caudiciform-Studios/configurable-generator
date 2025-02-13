@@ -360,6 +360,8 @@ pub struct CommonParams {
     prob: Value,
     #[serde(default="noise_threshold_default")]
     noise_threshold: Value,
+    #[serde(default="value_one")]
+    noise_scale: Value,
     #[serde(default="iterations_default")]
     iterations: Value,
     #[serde(default)]
@@ -456,7 +458,7 @@ impl CommonParams {
             if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng) {
                 return true
             }
-            let p:[f64; N] = point.map(|v| v as f64);
+            let p:[f64; N] = point.map(|v| v as f64 * self.noise_scale.val(&mut ctx.rng));
             if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.noise.get(p) < self.noise_threshold.val(&mut ctx.rng) {
                 return true
             }
@@ -468,6 +470,7 @@ impl CommonParams {
         self.tile_prob.solidify(ctx);
         self.prob.solidify(ctx);
         self.noise_threshold.solidify(ctx);
+        self.noise_scale.solidify(ctx);
         self.iterations.solidify(ctx);
         if let Some(ty) = &mut self.skip_ty {
             ty.solidify(ctx);
