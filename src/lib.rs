@@ -4,6 +4,9 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use anyhow::{Result, Context};
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
@@ -110,8 +113,8 @@ impl StringId {
     }
 }
 
-#[derive(Copy, Clone)]
-struct TileMapIndex(usize);
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct TileMapIndex(usize);
 
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
@@ -199,30 +202,31 @@ impl <const N: usize> TileMap<N> {
 
     pub fn neighboors(&self, idx: TileMapIndex, radius: u32) -> Vec<TileMapIndex> {
         let mut points = HashSet::with_capacity(3*N-1);
-        let point = self.index_to_point(idx);
-        points.insert(point);
-        neighboors_at_dimension(0, point, radius, &mut points);
-        points.into_iter().filter_map(|p| self.point_to_index(p)).collect()
+        points.insert(idx);
+        self.neighboors_at_dimension(0, idx, radius, &mut points);
+        points.into_iter().collect()
     }
+
+    fn neighboors_at_dimension(&self, n: usize, idx: TileMapIndex, radius: u32, points: &mut HashSet<TileMapIndex>) {
+        if n >= N {
+            return
+        }
+        let p = self.index_to_point(idx);
+        for d in -(radius as i32)..radius as i32+1 {
+            let v = p[n] as i32 + d;
+            if v >= 0 {
+                let mut pp = p;
+                pp[n] = v as u32;
+                if let Some(j) = self.point_to_index(pp) {
+                    points.insert(j);
+                    self.neighboors_at_dimension(n+1, j, radius, points);
+                }
+            }
+        }
+    }
+
 }
 
-fn neighboors_at_dimension<const N: usize>(n: usize, p: [u32; N], radius: u32, points: &mut HashSet<[u32; N]>) {
-    if n >= N {
-        return
-    }
-    for d in -(radius as i32)..radius as i32+1 {
-        if d == 0 {
-            continue
-        }
-        let v = p[n] as i32 + d;
-        if v >= 0 {
-            let mut pp = p;
-            pp[n] = v as u32;
-            points.insert(pp);
-            neighboors_at_dimension(n+1, pp, radius, points);
-        }
-    }
-}
 
 pub struct Ctx<const N: usize> {
     pub rng: SmallRng,
@@ -370,6 +374,19 @@ pub struct CommonParams {
     if_level_tag: Option<Tag>,
     #[serde(default)]
     if_not_level_tag: Option<Tag>,
+
+    #[serde(default)]
+    min_x: Option<Value>,
+    #[serde(default)]
+    max_x: Option<Value>,
+    #[serde(default)]
+    min_y: Option<Value>,
+    #[serde(default)]
+    max_y: Option<Value>,
+    #[serde(default)]
+    min_z: Option<Value>,
+    #[serde(default)]
+    max_z: Option<Value>,
 }
 fn prob_default() -> Value { Value::Const(1.0) }
 fn tile_prob_default() -> Value { Value::Const(1.0) }
@@ -392,6 +409,36 @@ impl CommonParams {
     }
 
     fn skip_tile<const N: usize>(&self, point: [u32; N], tilemap: &TileMap<N>, ctx: &mut Ctx<N>) -> bool {
+        if let Some(v) = &self.min_x {
+            if point[0] < v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
+        if let Some(v) = &self.min_y {
+            if point[1] < v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
+        if let Some(v) = &self.min_z {
+            if point[2] < v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
+        if let Some(v) = &self.max_x {
+            if point[0] > v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
+        if let Some(v) = &self.max_y {
+            if point[1] > v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
+        if let Some(v) = &self.max_z {
+            if point[2] > v.val(&mut ctx.rng).max(0.0) as u32 {
+                return true
+            }
+        }
         if let Some(idx) = tilemap.point_to_index(point) {
             if let Some(max) = &self.max_activations {
                 if ctx.current_activations as f64 >= max.val(&mut ctx.rng) {
@@ -438,6 +485,12 @@ impl CommonParams {
         }
         for tag in &mut self.tile_tags {
             tag.solidify(ctx);
+        }
+
+        for v in [&mut self.min_x, &mut self.min_y, &mut self.min_z, &mut self.max_x, &mut self.max_y, &mut self.max_z] {
+            if let Some(v) = v {
+                v.solidify(ctx);
+            }
         }
     }
 }
@@ -668,8 +721,18 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
         if self.if_ty.is_none() && self.if_not_ty.is_none() {
             return
         }
-        let mut changed = Vec::with_capacity(200);
-        for idx in tilemap.indexes() {
+
+        let threshold = self.threshold.val(&mut ctx.rng) as i32;
+        if threshold > (3*N-1) as i32 {
+            return
+        }
+        let mut indices:Vec<_> = tilemap.indexes().collect();
+        indices.shuffle(&mut ctx.rng);
+        #[cfg(not(feature = "parallel"))]
+        let iter = indices.into_iter();
+        #[cfg(feature = "parallel")]
+        let iter = indices.into_par_iter();
+        let changed:Vec<_> = iter.filter_map(|idx| {
             let tile = tilemap.get_tile_by_idx(idx);
             let check = if let Some(ty) = &self.if_ty {
                 tile != ty.as_packed()
@@ -677,8 +740,8 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
                 let ty = self.if_not_ty.as_ref().unwrap();
                 tile == ty.as_packed()
             };
-            if check || self.threshold.val(&mut ctx.rng) > 8.0 {
-                continue
+            if check {
+                return None;
             }
             let mut count = 0;
             let mut neighboor_count = 0;
@@ -697,10 +760,12 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
                 count += d;
             }
 
-            if count as f64 >= self.threshold.val(&mut ctx.rng) {
-                changed.push((idx, self.new_ty.clone()));
+            if count >= threshold {
+                Some((idx, self.new_ty.clone()))
+            } else {
+                None
             }
-        }
+        }).collect();
 
         for (idx, ty) in changed {
             tilemap.set_tile_by_idx(idx, &ty, ctx, common_params, &[]);
@@ -752,23 +817,37 @@ impl <const N: usize>ModifierImpl<N> for FlowField {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Grid {
-    spacing: (Value, Value),
+    #[serde(default="value_one")]
+    spacing_x: Value,
+    #[serde(default="value_one")]
+    spacing_y: Value,
+    #[serde(default="value_one")]
+    spacing_z: Value,
     tile: TileType,
 }
+fn value_one() -> Value { Value::Const(1.0) }
 
 impl <const N: usize>ModifierImpl<N> for Grid {
     fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
-        let spacing = self.spacing.0.val(&mut ctx.rng).max(0.0) as u32;
-        for p in tilemap.points() {
-            if p.iter().all(|v| v%spacing == 0) {
-                tilemap.set_tile(p, &self.tile, ctx, common_params, &[]);
+        let spacing = [
+            self.spacing_x.val(&mut ctx.rng).max(0.0) as u32,
+            self.spacing_y.val(&mut ctx.rng).max(0.0) as u32,
+            self.spacing_z.val(&mut ctx.rng).max(0.0) as u32,
+        ];
+        'outer: for p in tilemap.points() {
+            for n in 0..N {
+                if p[n] % spacing[n] != 0 {
+                    continue 'outer;
+                }
             }
+            tilemap.set_tile(p, &self.tile, ctx, common_params, &[]);
         }
     }
 
     fn solidify(&mut self, ctx: &mut Ctx<N>) {
-        self.spacing.0.solidify(ctx);
-        self.spacing.1.solidify(ctx);
+        self.spacing_x.solidify(ctx);
+        self.spacing_y.solidify(ctx);
+        self.spacing_z.solidify(ctx);
         self.tile.solidify(ctx);
     }
 }

@@ -22,7 +22,7 @@ fn main() {
 
     let mut ctx = Ctx::<3>::new(&mut rng);
     generator.solidify(&mut ctx);
-    let map = generator.generate([75,75,75], &mut ctx);
+    let map = generator.generate([100,100,45], &mut ctx);
 
     let mut vox = vox_writer::VoxWriter::create_empty();
 
