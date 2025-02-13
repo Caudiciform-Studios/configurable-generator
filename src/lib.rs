@@ -247,10 +247,9 @@ fn index_to_point<const N: usize>(idx: TileMapIndex, dimensions: &[usize; N]) ->
             r[1] = idx / dimensions[0] as u32;
         }
         3 => {
-            r[2] = idx / (dimensions[0] as u32 * dimensions[1] as u32);
-            idx -= r[2] * dimensions[0] as u32 * dimensions[1] as u32;
-            r[1] = idx / dimensions[0] as u32;
             r[0] = idx % dimensions[0] as u32;
+            r[1] = ((idx - r[0])/dimensions[0] as u32) % dimensions[1] as u32;
+            r[2] = (idx-r[0] -dimensions[1] as u32*r[1])/(dimensions[0] as u32*dimensions[1] as u32);
         }
         _ => unimplemented!()
     }
@@ -888,7 +887,12 @@ pub struct Worm {
     radius: Value,
     #[serde(default)]
     noise_offset: (Value, Value),
-    steering_strength: Value,
+    #[serde(default="value_one")]
+    steering_strength_x: Value,
+    #[serde(default="value_one")]
+    steering_strength_y: Value,
+    #[serde(default="value_one")]
+    steering_strength_z: Value,
 }
 fn default_worm_radius() -> Value { Value::Const(1.0) }
 
@@ -936,13 +940,20 @@ impl <const N: usize>ModifierImpl<N> for Worm {
                 }
             }
             for n in 0..N {
-                a[n] += ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng) + n as f64 * 1000.0)) * std::f64::consts::TAU * self.steering_strength.val(&mut ctx.rng);
+                let steer_strength = match n {
+                    1 => self.steering_strength_x.val(&mut ctx.rng),
+                    2 => self.steering_strength_y.val(&mut ctx.rng),
+                    _ => self.steering_strength_z.val(&mut ctx.rng),
+                };
+                a[n] += ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng) + n as f64 * 1000.0)) * std::f64::consts::TAU * steer_strength;
             }
         }
     }
 
     fn solidify(&mut self, ctx: &mut Ctx<N>) {
-        self.steering_strength.solidify(ctx);
+        self.steering_strength_x.solidify(ctx);
+        self.steering_strength_y.solidify(ctx);
+        self.steering_strength_z.solidify(ctx);
         self.len.solidify(ctx);
         self.radius.solidify(ctx);
         self.starting_ty.solidify(ctx);

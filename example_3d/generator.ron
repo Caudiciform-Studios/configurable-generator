@@ -8,7 +8,7 @@
         {Cellular: (if_ty: "empty", neighbor_ty: ["ground2"], threshold: "1", new_ty:"ground2"), iterations:"1"},
 
         {Worm: (starting_ty: "ground", len: "1000", trail: "empty", radius: "5", steering_strength: "0.1"), min_z: "2"},
-        {Worm: (starting_ty: "empty", len: "1000", trail: "empty", radius: "8", steering_strength: "0.05"), iterations:"4", min_z: "2"},
+        {Worm: (starting_ty: "empty", len: "1000", trail: "empty", radius: "8", steering_strength_x: "0.05", steering_strength_y: "0.05", steering_strength_z: "0.005"), iterations:"4", min_z: "2"},
 
 
         {Cellular: (if_ty: "empty", neighbor_ty: ["ground"], threshold: "3", new_ty:"empty"), tile_prob: "0.5", iterations: "5", min_z: "2"},
