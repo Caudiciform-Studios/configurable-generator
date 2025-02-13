@@ -6,32 +6,12 @@ use std::{
 
 use anyhow::{Result, Context};
 use serde::{Serialize, Deserialize};
+use serde_with::serde_as;
 use rand::prelude::*;
 use noise::{Fbm, Perlin, NoiseFn, ScalePoint};
 
 mod value;
 pub use value::Value;
-
-pub struct Seed(SmallRng);
-
-impl Seed {
-    pub fn new(seed: u64) -> Self {
-        Self(SmallRng::seed_from_u64(seed))
-    }
-
-    pub fn fork(&mut self) -> Self {
-        Self(SmallRng::from_rng(&mut self.0).unwrap())
-    }
-
-    pub fn to_u64(mut self) -> u64 {
-        self.0.gen()
-    }
-
-    pub fn to_rng(self) -> SmallRng {
-        self.0
-    }
-}
-
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Generator {
@@ -41,13 +21,13 @@ pub struct Generator {
 }
 
 impl Generator {
-    pub fn load(path: impl AsRef<Path>) -> Result<(Self, Vec<PathBuf>)> {
+    pub fn load<const N: usize>(path: impl AsRef<Path>) -> Result<(Self, Vec<PathBuf>)> {
         let path = path.as_ref();
         let mut generator: Generator = ron::from_str(&std::fs::read_to_string(path).with_context(|| format!("Loading: {path:?}"))?).with_context(|| format!("Loading: {path:?}"))?;
         let mut paths = vec![path.to_path_buf()];
         let base_path = path.parent().unwrap();
         for modifier in &mut generator.modifiers {
-            paths.extend(modifier.load(&base_path)?);
+            paths.extend(modifier.load::<N>(&base_path)?);
         }
         Ok((generator, paths))
     }
@@ -57,16 +37,16 @@ impl Generator {
         Ok(generator)
     }
 
-    pub fn load_dependencies(&mut self, files: &HashMap<String, String>) -> Result<Vec<String>> {
+    pub fn load_dependencies<const N: usize>(&mut self, files: &HashMap<String, String>) -> Result<Vec<String>> {
         let mut paths = vec![];
         for modifier in &mut self.modifiers {
-            paths.extend(modifier.load_from_strs(files)?);
+            paths.extend(modifier.load_from_strs::<N>(files)?);
         }
         Ok(paths)
     }
 
-    pub fn generate(&self, width: usize, height: usize, ctx: &mut Ctx) -> TileMap {
-        let mut tilemap = TileMap::new(width, height);
+    pub fn generate<const N: usize>(&self, dimensions: [usize; N], ctx: &mut Ctx<N>) -> TileMap<N> {
+        let mut tilemap = TileMap::new(dimensions);
 
 
         for modifier in &self.modifiers {
@@ -76,28 +56,15 @@ impl Generator {
         tilemap
     }
 
-    pub fn solidify(&mut self, rng: &mut impl Rng ) -> Ctx {
-        let mut rng = SmallRng::from_rng(rng).unwrap();
-
-        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.gen::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923));
-        let mut ctx = Ctx {
-            rng,
-            noise,
-            string_table: Default::default(),
-            reverse_string_table: Default::default(),
-            current_activations: 0,
-        };
-
+    pub fn solidify<const N: usize>(&mut self, ctx: &mut Ctx<N> ) {
         if let Some((w, h)) = &mut self.default_size {
-            w.solidify(&mut ctx);
-            h.solidify(&mut ctx);
+            w.solidify(ctx);
+            h.solidify(ctx);
         }
 
         for modifier in &mut self.modifiers {
-            modifier.solidify(&mut ctx);
+            modifier.solidify(ctx);
         }
-
-        ctx
     }
 }
 
@@ -129,7 +96,7 @@ pub enum StringId {
 }
 
 impl StringId {
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify<const N: usize>(&mut self, ctx: &mut Ctx<N>) {
         if let StringId::Display(s) = self {
             *self = StringId::Packed(ctx.tile_name_to_u64(s));
         }
@@ -143,77 +110,210 @@ impl StringId {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct TileMap {
-    pub height: usize,
-    pub width: usize,
+#[derive(Copy, Clone)]
+struct TileMapIndex(usize);
+
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TileMap<const N: usize> {
+    #[serde_as(as = "[_; N]")]
+    pub dimensions: [usize; N],
     pub tiles: Vec<u64>,
     pub tile_tags: Vec<HashSet<u64>>,
     pub tags: HashSet<u64>,
 }
 
-impl TileMap {
-    fn new(width: usize, height: usize) -> Self {
+impl <const N: usize> TileMap<N> {
+    fn new(dimensions: [usize; N]) -> Self {
+        let len = dimensions.iter().copied().reduce(|a,b| a*b).unwrap();
         Self {
-            width,
-            height,
-            tiles: vec![u64::MAX; width*height],
-            tile_tags: vec![HashSet::new(); width*height],
+            dimensions,
+            tiles: vec![u64::MAX; len],
+            tile_tags: vec![HashSet::new(); len],
             tags: HashSet::new(),
         }
     }
 
-    pub fn tiles_mut(&mut self) -> impl Iterator<Item = ((u32, u32), &mut u64)> {
-        self.tiles.iter_mut().enumerate().map(|(i,t)| {
-            let x = (i % self.width) as u32;
-            let y = (i / self.width) as u32;
-            ((x,y), t)
+    pub fn index_to_point(&self, idx: TileMapIndex) -> [u32; N] {
+        index_to_point(idx, &self.dimensions)
+    }
+
+    pub fn point_to_index(&self, point: [u32; N]) -> Option<TileMapIndex> {
+        point_to_index(point, &self.dimensions)
+    }
+
+    pub fn tiles_mut(&mut self) -> impl Iterator<Item = ([u32; N], &mut u64)> {
+        let TileMap {
+            tiles,
+            dimensions,
+            ..
+        } = self;
+        tiles.iter_mut().enumerate().map(|(i,t)| {
+            (index_to_point(TileMapIndex(i), dimensions), t)
         })
     }
 
-    pub fn tiles(&self) -> impl Iterator<Item = ((u32, u32), &u64)> {
+    pub fn tiles(&self) -> impl Iterator<Item = ([u32; N], &u64)> {
         self.tiles.iter().enumerate().map(|(i,t)| {
-            let x = (i % self.width) as u32;
-            let y = (i / self.width) as u32;
-            ((x,y), t)
+            (self.index_to_point(TileMapIndex(i)), t)
         })
     }
 
-    pub fn set_tile(&mut self, x: i32, y: i32, ty: &TileType, ctx: &mut Ctx, common_params: &CommonParams) -> bool {
-        if x >= 0 && y >= 0 {
-            let i = y as usize * self.width + x as usize;
-            self.set_tile_by_idx(i, ty, ctx, common_params)
+    pub fn set_tile(&mut self, point: [u32; N], ty: &TileType, ctx: &mut Ctx<N>, common_params: &CommonParams, tags: &[Tag]) -> bool {
+        if let Some(i) = self.point_to_index(point) {
+            self.set_tile_by_idx(i, ty, ctx, common_params, tags)
         } else {
             false
         }
     }
 
-    pub fn set_tile_by_idx(&mut self, idx: usize, ty: &TileType, ctx: &mut Ctx, common_params: &CommonParams) -> bool {
-        let x = idx % self.width;
-        let y = idx / self.width;
-        if x >= self.width || y >= self.height {
-            return false
-        }
-        if !common_params.skip_tile(x as u32, y as u32, self, ctx) {
-            self.tiles[idx] = ty.as_packed();
-            self.tile_tags[idx].extend(common_params.tile_tags.iter().map(|t| t.as_packed()));
+    pub fn set_tile_by_idx(&mut self, idx: TileMapIndex, ty: &TileType, ctx: &mut Ctx<N>, common_params: &CommonParams, tags: &[Tag]) -> bool {
+        let point = self.index_to_point(idx);
+        if !common_params.skip_tile(point, self, ctx) {
+            self.tiles[idx.0] = ty.as_packed();
+            self.tile_tags[idx.0].extend(tags.iter().map(|t| t.as_packed()));
+            self.tile_tags[idx.0].extend(common_params.tile_tags.iter().map(|t| t.as_packed()));
             ctx.tile_set();
             true
         } else {
             false
         }
     }
+
+    pub fn get_tile(&self, point: [u32; N]) -> Option<u64> {
+        self.point_to_index(point).and_then(|i| Some(self.get_tile_by_idx(i)))
+    }
+
+    pub fn get_tile_by_idx(&self, idx: TileMapIndex) -> u64 {
+        self.tiles[idx.0]
+    }
+
+    pub fn indexes(&self) -> impl Iterator<Item = TileMapIndex> {
+        (0..self.tiles.len()).into_iter().map(|i| TileMapIndex(i))
+    }
+
+    pub fn points(&self) -> impl Iterator<Item = [u32; N]> {
+        let dimensions = self.dimensions;
+        (0..self.tiles.len()).into_iter().map(move |i| index_to_point(TileMapIndex(i), &dimensions))
+    }
+
+    pub fn neighboors(&self, idx: TileMapIndex, radius: u32) -> Vec<TileMapIndex> {
+        let mut points = HashSet::with_capacity(3*N-1);
+        let point = self.index_to_point(idx);
+        points.insert(point);
+        neighboors_at_dimension(0, point, radius, &mut points);
+        points.into_iter().filter_map(|p| self.point_to_index(p)).collect()
+    }
 }
 
-pub struct Ctx {
+fn neighboors_at_dimension<const N: usize>(n: usize, p: [u32; N], radius: u32, points: &mut HashSet<[u32; N]>) {
+    if n >= N {
+        return
+    }
+    for d in -(radius as i32)..radius as i32+1 {
+        if d == 0 {
+            continue
+        }
+        let v = p[n] as i32 + d;
+        if v >= 0 {
+            let mut pp = p;
+            pp[n] = v as u32;
+            points.insert(pp);
+            neighboors_at_dimension(n+1, pp, radius, points);
+        }
+    }
+}
+
+pub struct Ctx<const N: usize> {
     pub rng: SmallRng,
-    noise: Box<dyn NoiseFn<f64, 2>>,
+    noise: Box<dyn NoiseFn<f64, N>>,
     pub string_table: HashMap<String, u64>,
     pub reverse_string_table: HashMap<u64, String>,
     current_activations: u32,
 }
 
-impl Ctx {
+fn index_to_point<const N: usize>(idx: TileMapIndex, dimensions: &[usize; N]) -> [u32; N] {
+    let mut idx = idx.0 as u32;
+    let mut r = [0; N];
+    match N {
+        1 => {
+            r[0] = idx;
+        }
+        2 => {
+            r[0] = idx % dimensions[0] as u32;
+            r[1] = idx / dimensions[0] as u32;
+        }
+        3 => {
+            r[2] = idx / (dimensions[0] as u32 * dimensions[1] as u32);
+            idx -= r[2] * dimensions[0] as u32 * dimensions[1] as u32;
+            r[1] = idx / dimensions[0] as u32;
+            r[0] = idx % dimensions[0] as u32;
+        }
+        _ => unimplemented!()
+    }
+    r
+}
+
+fn point_to_index<const N: usize>(point: [u32; N], dimensions: &[usize; N]) -> Option<TileMapIndex> {
+    for (v,d) in point.iter().zip(dimensions.iter()) {
+        if *v as usize>= *d {
+            return None
+        }
+    }
+    Some(TileMapIndex(match N {
+        1 => point[0] as usize,
+        2 => point[1] as usize * dimensions[0] + point[0] as usize,
+        3 => point[2] as usize * dimensions[0] * dimensions[1] + point[1] as usize * dimensions[0] + point[0] as usize,
+        _ => unimplemented!()
+    }))
+}
+
+impl Ctx<2> {
+    pub fn new(rng: &mut impl Rng) -> Self {
+        let mut rng = SmallRng::from_rng(rng).unwrap();
+
+        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.gen::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923));
+        Ctx {
+            rng,
+            noise,
+            string_table: Default::default(),
+            reverse_string_table: Default::default(),
+            current_activations: 0,
+        }
+    }
+}
+
+impl Ctx<3> {
+    pub fn new(rng: &mut impl Rng) -> Self {
+        let mut rng = SmallRng::from_rng(rng).unwrap();
+
+        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.gen::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923).set_z_scale(0.0923));
+        Ctx {
+            rng,
+            noise,
+            string_table: Default::default(),
+            reverse_string_table: Default::default(),
+            current_activations: 0,
+        }
+    }
+}
+
+impl Ctx<4> {
+    pub fn new(rng: &mut impl Rng) -> Self {
+        let mut rng = SmallRng::from_rng(rng).unwrap();
+
+        let noise = Box::new(ScalePoint::new(Fbm::<Perlin>::new(rng.gen::<u32>())).set_x_scale(0.0923).set_y_scale(0.0923).set_z_scale(0.0923).set_u_scale(0.0923));
+        Ctx {
+            rng,
+            noise,
+            string_table: Default::default(),
+            reverse_string_table: Default::default(),
+            current_activations: 0,
+        }
+    }
+}
+
+impl <const N: usize>Ctx<N> {
     pub fn fork_rng(&mut self) -> SmallRng {
         SmallRng::from_rng(&mut self.rng).unwrap()
     }
@@ -277,7 +377,7 @@ fn noise_threshold_default() -> Value { Value::Const(f64::NEG_INFINITY) }
 fn iterations_default() -> Value { Value::Const(1.0) }
 
 impl CommonParams {
-    fn skip_modifier(&self, ctx: &mut Ctx, tilemap: &TileMap) -> bool {
+    fn skip_modifier<const N: usize>(&self, ctx: &mut Ctx<N>, tilemap: &TileMap<N>) -> bool {
         if let Some(tag) = &self.if_level_tag {
             if !tilemap.tags.contains(&tag.as_packed()) {
                return true
@@ -291,34 +391,35 @@ impl CommonParams {
         self.prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.prob.val(&mut ctx.rng)
     }
 
-    fn skip_tile(&self, x: u32, y: u32, tilemap: &TileMap, ctx: &mut Ctx) -> bool {
-        if let Some(max) = &self.max_activations {
-            if ctx.current_activations as f64 >= max.val(&mut ctx.rng) {
+    fn skip_tile<const N: usize>(&self, point: [u32; N], tilemap: &TileMap<N>, ctx: &mut Ctx<N>) -> bool {
+        if let Some(idx) = tilemap.point_to_index(point) {
+            if let Some(max) = &self.max_activations {
+                if ctx.current_activations as f64 >= max.val(&mut ctx.rng) {
+                    return true
+                }
+            }
+            if let Some(ty) = &self.skip_ty {
+                if tilemap.tiles[idx.0] == ty.as_packed() {
+                    return true
+                }
+            }
+            if let Some(ty) = &self.only_on_ty {
+                if tilemap.tiles[idx.0] != ty.as_packed() {
+                    return true
+                }
+            }
+            if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng) {
                 return true
             }
-        }
-        if let Some(ty) = &self.skip_ty {
-            let i = y as usize * tilemap.width + x as usize;
-            if tilemap.tiles[i] == ty.as_packed() {
+            let p:[f64; N] = point.map(|v| v as f64);
+            if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.noise.get(p) < self.noise_threshold.val(&mut ctx.rng) {
                 return true
             }
-        }
-        if let Some(ty) = &self.only_on_ty {
-            let i = y as usize * tilemap.width + x as usize;
-            if tilemap.tiles[i] != ty.as_packed() {
-                return true
-            }
-        }
-        if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng) {
-            return true
-        }
-        if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.noise.get([x as f64,y as f64]) < self.noise_threshold.val(&mut ctx.rng) {
-            return true
         }
         false
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify<const N: usize>(&mut self, ctx: &mut Ctx<N>) {
         self.tile_prob.solidify(ctx);
         self.prob.solidify(ctx);
         self.noise_threshold.solidify(ctx);
@@ -350,7 +451,7 @@ pub struct Modifier {
 }
 
 impl Modifier {
-    fn apply(&self, tilemap: &mut TileMap, ctx: &mut Ctx) {
+    fn apply<const N: usize>(&self, tilemap: &mut TileMap<N>, ctx: &mut Ctx<N>) {
         if !self.common_params.skip_modifier(ctx, tilemap) {
             for _ in 0..self.common_params.iterations.val(&mut ctx.rng).max(0.0) as u32 {
                 self.logic.logic().apply(tilemap, &self.common_params, ctx);
@@ -359,17 +460,17 @@ impl Modifier {
         ctx.modifier_finished();
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify<const N: usize>(&mut self, ctx: &mut Ctx<N>) {
         self.common_params.solidify(ctx);
         self.logic.logic_mut().solidify(ctx);
     }
 
-    fn load(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
-        self.logic.logic_mut().load(base_path)
+    fn load<const N: usize>(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
+        self.logic.logic_mut::<N>().load(base_path)
     }
 
-    fn load_from_strs(&mut self, strs: &HashMap<String, String>) -> Result<Vec<String>> {
-        self.logic.logic_mut().load_from_strs(strs)
+    fn load_from_strs<const N: usize>(&mut self, strs: &HashMap<String, String>) -> Result<Vec<String>> {
+        self.logic.logic_mut::<N>().load_from_strs(strs)
     }
 }
 
@@ -382,14 +483,14 @@ macro_rules! modifier_logic {
             )*
         }
         impl ModifierLogic {
-            pub fn logic(&self) -> & dyn ModifierImpl {
+            pub fn logic<const N: usize>(&self) -> & dyn ModifierImpl<N> {
                 match self {
                     $(
                         ModifierLogic::$x(m) => m,
                     )*
                 }
             }
-            pub fn logic_mut(&mut self) -> &mut dyn ModifierImpl {
+            pub fn logic_mut<const N: usize>(&mut self) -> &mut dyn ModifierImpl<N> {
                 match self {
                     $(
                         ModifierLogic::$x(m) => m,
@@ -412,12 +513,13 @@ modifier_logic! {
     SetTag,
     IfTag,
     FloodRegion,
+    FlowField,
     Grid
 }
 
-pub trait ModifierImpl {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx);
-    fn solidify(&mut self, _ctx: &mut Ctx) { }
+pub trait ModifierImpl<const N: usize> {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>);
+    fn solidify(&mut self, _ctx: &mut Ctx<N>) { }
     fn load(&mut self, _base_path: &Path) -> Result<Vec<PathBuf>> { Ok(vec![]) }
     fn load_from_strs(&mut self, _strs: &HashMap<String,String>) -> Result<Vec<String>> { Ok(vec![]) }
 }
@@ -425,14 +527,14 @@ pub trait ModifierImpl {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Fill(TileType);
 
-impl ModifierImpl for Fill {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        for i in 0..tilemap.tiles.len() {
-            tilemap.set_tile_by_idx(i, &self.0, ctx, common_params);
+impl <const N: usize>ModifierImpl<N> for Fill {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        for i in tilemap.indexes() {
+            tilemap.set_tile_by_idx(i, &self.0, ctx, common_params, &[]);
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.0.solidify(ctx);
     }
 }
@@ -440,12 +542,12 @@ impl ModifierImpl for Fill {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SetTag(Tag);
 
-impl ModifierImpl for SetTag {
-    fn apply(&self, tilemap: &mut TileMap, _common_params: &CommonParams, _ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for SetTag {
+    fn apply(&self, tilemap: &mut TileMap<N>, _common_params: &CommonParams, _ctx: &mut Ctx<N>) {
         tilemap.tags.insert(self.0.as_packed());
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.0.solidify(ctx);
     }
 }
@@ -458,8 +560,8 @@ pub struct IfTag {
     inner: Vec<Modifier>,
 }
 
-impl ModifierImpl for IfTag {
-    fn apply(&self, tilemap: &mut TileMap, _common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for IfTag {
+    fn apply(&self, tilemap: &mut TileMap<N>, _common_params: &CommonParams, ctx: &mut Ctx<N>) {
         let run = if tilemap.tags.contains(&self.tag.as_packed()) {
             !self.invert
         } else {
@@ -476,7 +578,7 @@ impl ModifierImpl for IfTag {
     fn load(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
         let mut paths = vec![];
         for m in &mut self.inner {
-            paths.extend(m.load(base_path)?);
+            paths.extend(m.load::<N>(base_path)?);
         }
         Ok(paths)
     }
@@ -484,12 +586,12 @@ impl ModifierImpl for IfTag {
     fn load_from_strs(&mut self, strs: &HashMap<String,String>) -> Result<Vec<String>> {
         let mut paths = vec![];
         for m in &mut self.inner {
-            paths.extend(m.load_from_strs(strs)?);
+            paths.extend(m.load_from_strs::<N>(strs)?);
         }
         Ok(paths)
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.tag.solidify(ctx);
         for m in &mut self.inner {
             m.solidify(ctx);
@@ -500,17 +602,17 @@ impl ModifierImpl for IfTag {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Choice(Vec<Option<TileType>>);
 
-impl ModifierImpl for Choice {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for Choice {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
         let mut rng = ctx.fork_rng();
-        for i in 0..tilemap.tiles.len() {
+        for i in tilemap.indexes() {
             if let Some(t) = self.0.choose(&mut rng).map(|t| t.as_ref()).flatten() {
-                tilemap.set_tile_by_idx(i, t, ctx, common_params);
+                tilemap.set_tile_by_idx(i, t, ctx, common_params, &[]);
             }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         for ty in &mut self.0 {
             if let Some(ty) = ty {
                 ty.solidify(ctx);
@@ -522,20 +624,24 @@ impl ModifierImpl for Choice {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Scatter(Value, TileType);
 
-impl ModifierImpl for Scatter {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        let mut rng = ctx.fork_rng();
+impl <const N: usize>ModifierImpl<N> for Scatter {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
         for _ in 0..self.0.val(&mut ctx.rng).max(0.0) as u32 {
+            let mut tries = 100;
             loop {
-                let idx = rng.gen_range(0..tilemap.tiles.len());
-                if tilemap.set_tile_by_idx(idx, &self.1, ctx, common_params) {
+                tries -= 1;
+                if tries < 0 {
+                    break
+                }
+                let idx = tilemap.indexes().choose(&mut ctx.rng).unwrap();
+                if tilemap.set_tile_by_idx(idx, &self.1, ctx, common_params, &[]) {
                     break
                 }
             }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.0.solidify(ctx);
         self.1.solidify(ctx);
     }
@@ -557,59 +663,51 @@ pub struct Cellular {
 }
 fn live_threshold_default() -> Value { Value::Range(0.0, 8.0) }
 
-impl ModifierImpl for Cellular {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for Cellular {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
         if self.if_ty.is_none() && self.if_not_ty.is_none() {
             return
         }
         let mut changed = Vec::with_capacity(200);
-        for ((x,y), tile) in tilemap.tiles() {
+        for idx in tilemap.indexes() {
+            let tile = tilemap.get_tile_by_idx(idx);
             let check = if let Some(ty) = &self.if_ty {
-                *tile != ty.as_packed()
+                tile != ty.as_packed()
             } else {
                 let ty = self.if_not_ty.as_ref().unwrap();
-                *tile == ty.as_packed()
+                tile == ty.as_packed()
             };
             if check || self.threshold.val(&mut ctx.rng) > 8.0 {
                 continue
             }
-            let x = x as i32;
-            let y = y as i32;
             let mut count = 0;
-            for nx in -1..2 {
-                let nx = x + nx;
-                if nx >= 0 && nx < tilemap.width as i32 {
-                    for ny in -1..2 {
-                        let ny = y + ny;
-                        if ny >= 0 && ny < tilemap.height as i32 {
-                            let j = ny as usize * tilemap.width + nx as usize;
-                            if self.neighbor_ty.iter().any(|ty| tilemap.tiles[j] == ty.as_packed()) {
-                                count += 1;
-                            }
-                            if !self.neighbor_not_ty.is_empty() && self.neighbor_not_ty.iter().all(|ty| tilemap.tiles[j] != ty.as_packed()) {
-                                count += 1;
-                            }
-                        } else if !self.neighbor_not_ty.is_empty() {
-                            count += 1;
-                        }
-                    }
-                } else if !self.neighbor_not_ty.is_empty() {
+            let mut neighboor_count = 0;
+            for neighboor_idx in tilemap.neighboors(idx, 1) {
+                neighboor_count += 1;
+                let neighboor = tilemap.get_tile_by_idx(neighboor_idx);
+                if self.neighbor_ty.iter().any(|ty| neighboor == ty.as_packed()) {
+                    count += 1;
+                }
+                if !self.neighbor_not_ty.is_empty() && self.neighbor_not_ty.iter().all(|ty| neighboor != ty.as_packed()) {
                     count += 1;
                 }
             }
+            if !self.neighbor_not_ty.is_empty() {
+                let d = (3*N-1) as i32 - neighboor_count;
+                count += d;
+            }
 
             if count as f64 >= self.threshold.val(&mut ctx.rng) {
-                let i = y as usize * tilemap.width + x as usize;
-                changed.push((i, self.new_ty.clone()));
+                changed.push((idx, self.new_ty.clone()));
             }
         }
 
-        for (i, ty) in changed {
-            tilemap.set_tile_by_idx(i, &ty, ctx, common_params);
+        for (idx, ty) in changed {
+            tilemap.set_tile_by_idx(idx, &ty, ctx, common_params, &[]);
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.threshold.solidify(ctx);
         if let Some(ty) = &mut self.if_ty {
             ty.solidify(ctx);
@@ -628,21 +726,47 @@ impl ModifierImpl for Cellular {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct FlowField {
+    ty: TileType,
+    #[serde(default="scale_value")]
+    scale: Value,
+}
+fn scale_value() -> Value { Value::Const(1.0) }
+
+impl <const N: usize>ModifierImpl<N> for FlowField {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        for p in tilemap.points() {
+            let scaled_point = p.map(|v| v as f64 * self.scale.val(&mut ctx.rng) as f64);
+            let a = ctx.noise.get(scaled_point) * std::f64::consts::TAU;
+            let mut a_tag = Tag::Display(format!("angle_{a}"));
+            a_tag.solidify(ctx);
+            tilemap.set_tile(p, &self.ty, ctx, common_params, &[a_tag]);
+        }
+    }
+
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
+        self.scale.solidify(ctx);
+        self.ty.solidify(ctx);
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Grid {
     spacing: (Value, Value),
     tile: TileType,
 }
 
-impl ModifierImpl for Grid {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        for x in (0..tilemap.width).step_by(self.spacing.0.val(&mut ctx.rng).max(0.0) as usize) {
-            for y in (0..tilemap.height).step_by(self.spacing.1.val(&mut ctx.rng).max(0.0) as usize) {
-                tilemap.set_tile(x as i32, y as i32, &self.tile, ctx, common_params);
+impl <const N: usize>ModifierImpl<N> for Grid {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        let spacing = self.spacing.0.val(&mut ctx.rng).max(0.0) as u32;
+        for p in tilemap.points() {
+            if p.iter().all(|v| v%spacing == 0) {
+                tilemap.set_tile(p, &self.tile, ctx, common_params, &[]);
             }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.spacing.0.solidify(ctx);
         self.spacing.1.solidify(ctx);
         self.tile.solidify(ctx);
@@ -652,18 +776,18 @@ impl ModifierImpl for Grid {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Replace(TileType, TileType);
 
-impl ModifierImpl for Replace {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        let mut idxs = (0..tilemap.tiles.len()).collect::<Vec<_>>();
+impl <const N: usize>ModifierImpl<N> for Replace {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        let mut idxs = tilemap.indexes().collect::<Vec<_>>();
         idxs.shuffle(&mut ctx.rng);
         for i in idxs {
-            if tilemap.tiles[i] == self.0.as_packed() {
-                tilemap.set_tile_by_idx(i, &self.1, ctx, common_params);
+            if tilemap.get_tile_by_idx(i) == self.0.as_packed() {
+                tilemap.set_tile_by_idx(i, &self.1, ctx, common_params, &[]);
             }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.0.solidify(ctx);
         self.1.solidify(ctx);
     }
@@ -678,43 +802,68 @@ pub struct Worm {
     starting_ty: TileType,
     len: Value,
     trail: TileType,
+    #[serde(default="default_worm_radius")]
+    radius: Value,
+    #[serde(default)]
+    noise_offset: (Value, Value),
     steering_strength: Value,
 }
+fn default_worm_radius() -> Value { Value::Const(1.0) }
 
-impl ModifierImpl for Worm {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
-        unimplemented!();
-        let mut current = ctx.rng.gen_range(0..tilemap.tiles.len());
-        let mut tries = 100;
-        while self.starting_ty.as_packed() != tilemap.tiles[current] || common_params.skip_tile((current%tilemap.width) as u32, (current/tilemap.width) as u32, tilemap, ctx) {
-            tries -= 1;
-            if tries <= 0 {
-                return
-            }
-            current = ctx.rng.gen_range(0..tilemap.tiles.len());
-        }
-        let mut current_x = (current % tilemap.width) as f64;
-        let mut current_y = (current / tilemap.width) as f64;
+impl <const N: usize>ModifierImpl<N> for Worm {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        assert!(N<4 && N>1);
+        let Some((mut current_p, _current)) = tilemap.tiles().filter(|(_, t)| **t == self.starting_ty.as_packed()).choose(&mut ctx.rng) else { return };
+
+        let mut current_p = current_p.map(|v| v as f64);
+
         let mut len = self.len.val(&mut ctx.rng).max(0.0) as u32;
-        let mut a = ctx.noise.get([current_x as f64,current_y as f64]) * std::f64::consts::TAU;
-        while len > 0 && current_x > 0.0 && current_x < tilemap.width as f64 && current_y > 0.0 && current_y < tilemap.height as f64 {
+
+        let mut a = [0; N].map(|_| ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng))) * std::f64::consts::TAU);
+        let radius = self.radius.val(&mut ctx.rng).max(0.0);
+        let radius_squared = radius.powi(2);
+        while len > 0 && current_p.iter().enumerate().all(|(i, v)| *v >= 0.0 && (*v as usize) < tilemap.dimensions[i]) {
             len -= 1;
-            let next_x = a.cos() * 1.0 + current_x;
-            let next_y = a.sin() * 1.0 + current_y;
-            if next_x > 0.0 && next_x < tilemap.width as f64 && next_y > 0.0 && next_y < tilemap.height as f64 && self.impassable.iter().find(|ty| ty.as_packed() == tilemap.tiles[next_y as usize * tilemap.width + next_x as usize]).is_none() {
-                current_x = next_x;
-                current_y = next_y;
+            let mut next_p = current_p;
+            if N == 2 {
+                next_p[0] += a[0].cos();
+                next_p[1] += a[1].sin();
+            } else {
+                next_p[0] += a[0].cos()*a[1].cos();
+                next_p[1] += a[0].sin()*a[1].cos();
+                next_p[2] += a[1].sin();
             }
-            tilemap.tiles[current_y as usize * tilemap.width + current_x as usize] = self.trail.as_packed();
-            ctx.tile_set();
-            a += ctx.noise.get([current_x + len as f64,current_y + len as f64]) * std::f64::consts::TAU * self.steering_strength.val(&mut ctx.rng);
+            if next_p.iter().all(|v| *v >= 0.0) {
+                let next_pi = next_p.map(|v| v as u32);
+                if let Some(next_idx) = tilemap.point_to_index(next_pi) {
+                    if self.impassable.iter().find(|ty| Some(ty.as_packed()) == tilemap.get_tile(next_pi)).is_none() {
+                        //TODO: handle 3d
+                        let aa = (next_p[1]-current_p[1]).atan2(next_p[0]-current_p[0]) + std::f64::consts::FRAC_PI_2;
+                        let mut a_tag = Tag::Display(format!("angle_{aa}"));
+                        current_p = next_p;
+                        a_tag.solidify(ctx);
+                        for p in tilemap.neighboors(next_idx, radius.ceil() as u32) {
+                            let n = tilemap.index_to_point(p);
+                            if current_p.iter().zip(n.iter()).map(|(a,b)| (*b as f64- *a).powi(2)).into_iter().sum::<f64>() <= radius_squared {
+                                tilemap.set_tile_by_idx(p, &self.trail, ctx, common_params, &[a_tag.clone()]);
+                            }
+                        }
+                    }
+                }
+            }
+            for n in 0..N {
+                a[n] += ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng) + n as f64 * 1000.0)) * std::f64::consts::TAU * self.steering_strength.val(&mut ctx.rng);
+            }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.steering_strength.solidify(ctx);
         self.len.solidify(ctx);
+        self.radius.solidify(ctx);
         self.starting_ty.solidify(ctx);
+        self.noise_offset.0.solidify(ctx);
+        self.noise_offset.1.solidify(ctx);
         self.trail.solidify(ctx);
         for ty in &mut self.impassable {
             ty.solidify(ctx);
@@ -730,8 +879,8 @@ pub struct External(
     #[serde(default)]
     Option<Vec<Modifier>>
 );
-impl ModifierImpl for External {
-    fn apply(&self, tilemap: &mut TileMap, _common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for External {
+    fn apply(&self, tilemap: &mut TileMap<N>, _common_params: &CommonParams, ctx: &mut Ctx<N>) {
         if let Some(modifiers) = &self.1 {
             for modifier in modifiers {
                 modifier.apply(tilemap, ctx);
@@ -739,7 +888,7 @@ impl ModifierImpl for External {
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         if let Some(modifiers) = &mut self.1 {
             for modifier in modifiers {
                 modifier.solidify(ctx);
@@ -748,7 +897,7 @@ impl ModifierImpl for External {
     }
 
     fn load(&mut self, base_path: &Path) -> Result<Vec<PathBuf>> {
-        let (generator, paths) = Generator::load(base_path.join(&self.0))?;
+        let (generator, paths) = Generator::load::<N>(base_path.join(&self.0))?;
         self.1 = Some(generator.modifiers);
         Ok(paths)
     }
@@ -757,13 +906,13 @@ impl ModifierImpl for External {
         if let Some(modifiers) = &mut self.1 {
             let mut paths = vec![];
             for modifier in modifiers {
-                paths.extend(modifier.load_from_strs(strs)?);
+                paths.extend(modifier.load_from_strs::<N>(strs)?);
             }
             Ok(paths)
         } else {
             if let Some(data) = strs.get(&self.0) {
                 let mut generator = Generator::from_str(data)?;
-                let paths = generator.load_dependencies(strs)?;
+                let paths = generator.load_dependencies::<N>(strs)?;
                 self.1 = Some(generator.modifiers);
                 Ok(paths)
             } else {
@@ -784,8 +933,10 @@ pub struct Rooms {
     max_overlaps: Value,
 }
 
-impl ModifierImpl for Rooms {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for Rooms {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
+        unimplemented!()
+            /*
         let mut overlaps = 0;
         let max_overlaps = self.max_overlaps.val(&mut ctx.rng).max(0.0) as u32;
         let mut rooms = vec![];
@@ -811,19 +962,20 @@ impl ModifierImpl for Rooms {
                         let i = ty as usize * tilemap.width + tx as usize;
                         if tx == x || ty == y || tx == x+width-1 || ty == y+height-1 {
                             if tilemap.tiles[i] != self.floor.as_packed() {
-                                tilemap.set_tile_by_idx(i, &self.walls, ctx, common_params);
+                                tilemap.set_tile_by_idx(i, &self.walls, ctx, common_params, &[]);
                             }
                         } else {
-                            tilemap.set_tile_by_idx(i, &self.floor, ctx, common_params);
+                            tilemap.set_tile_by_idx(i, &self.floor, ctx, common_params, &[]);
                         }
                     }
                 }
                 break
             }
         }
+        */
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.count.solidify(ctx);
         self.width.solidify(ctx);
         self.height.solidify(ctx);
@@ -842,8 +994,8 @@ pub struct FloodRegion {
     #[serde(default)]
     if_contains: Option<TileType>,
 }
-impl ModifierImpl for FloodRegion {
-    fn apply(&self, tilemap: &mut TileMap, common_params: &CommonParams, ctx: &mut Ctx) {
+impl <const N: usize>ModifierImpl<N> for FloodRegion {
+    fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
         let boundry = self.bounded_by.as_packed();
         let mut tiles = if let Some(seed) = &self.unless_contains {
             let seed = seed.as_packed();
@@ -858,19 +1010,11 @@ impl ModifierImpl for FloodRegion {
         let mut did_work = true;
         while did_work {
             did_work = false;
-            'outer: for i in 0..tiles.len() {
-                if tiles[i] == 0 {
-                    let x = (i % tilemap.width) as i32;
-                    let y = (i / tilemap.width) as i32;
-                    for (dx, dy) in [(-1,0), (1,0), (0,-1), (0,1)] {
-                        let xx = x + dx;
-                        let yy = y + dy;
-                        if xx < 0 || xx >= tilemap.width as i32 || yy < 0 || yy >= tilemap.height as i32 {
-                            continue;
-                        }
-                        let j = yy as usize * tilemap.width + xx as usize;
-                        if 0 < tiles[j] && tiles[j] < u32::MAX {
-                            tiles[i] = tiles[j];
+            'outer: for i in tilemap.indexes() {
+                if tiles[i.0] == 0 {
+                    for neighboor in tilemap.neighboors(i, 1) {
+                        if 0 < tiles[neighboor.0] && tiles[neighboor.0] < u32::MAX {
+                            tiles[i.0] = tiles[neighboor.0];
                             did_work = true;
                             continue 'outer
                         }
@@ -880,21 +1024,19 @@ impl ModifierImpl for FloodRegion {
         }
 
         for (i, v) in tiles.iter().enumerate() {
-            let x = i % tilemap.width;
-            let y = i / tilemap.width;
             if self.unless_contains.is_none() {
                 if 0 < *v && tiles[i] < u32::MAX {
-                    tilemap.set_tile_by_idx(i, &self.with, ctx, common_params);
+                    tilemap.set_tile_by_idx(TileMapIndex(i), &self.with, ctx, common_params, &[]);
                 }
             } else {
                 if 0  == *v {
-                    tilemap.set_tile_by_idx(i, &self.with, ctx, common_params);
+                    tilemap.set_tile_by_idx(TileMapIndex(i), &self.with, ctx, common_params, &[]);
                 }
             }
         }
     }
 
-    fn solidify(&mut self, ctx: &mut Ctx) {
+    fn solidify(&mut self, ctx: &mut Ctx<N>) {
         self.with.solidify(ctx);
         self.bounded_by.solidify(ctx);
         if let Some(v) = &mut self.unless_contains {

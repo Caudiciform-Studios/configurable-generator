@@ -1,0 +1,17 @@
+(
+    modifiers: [
+        {Fill: "ground"},
+        //{Scatter: ("10", "empty")},
+        {Worm: (starting_ty: "ground", len: "1000", trail: "empty", radius: "5", steering_strength: "0.1")},
+        {Worm: (starting_ty: "empty", len: "1000", trail: "empty", radius: "8", steering_strength: "0.05"), iterations:"4"},
+
+
+        {Cellular: (if_ty: "empty", neighbor_ty: ["ground"], threshold: "3", new_ty:"empty"), tile_prob: "0.5", iterations: "5"},
+
+        {Cellular: (if_ty: "ground", neighbor_ty: ["empty"], threshold: "1", new_ty:"ground2") },
+        {Cellular: (if_ty: "ground", neighbor_ty: ["ground2"], threshold: "1", new_ty:"ground2"), tile_prob: "0.5", iterations: "5"},
+
+        {Cellular: (if_ty: "empty", neighbor_ty: ["ground2"], threshold: "1", new_ty:"moss"), tile_prob: "0.01"},
+        {Cellular: (if_ty: "empty", neighbor_ty: ["moss"], threshold: "1", new_ty:"moss"), tile_prob: "0.1", iterations: "4"},
+    ]
+)

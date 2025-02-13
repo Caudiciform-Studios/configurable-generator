@@ -20,7 +20,7 @@ impl Default for Value {
 }
 
 impl Value {
-    pub fn solidify(&mut self, ctx: &mut Ctx) {
+    pub fn solidify<const N: usize>(&mut self, ctx: &mut Ctx<N>) {
         if let Value::Range(start, end) = self {
             *self = Value::Const(ctx.rng.gen_range(*start..*end));
         }
