@@ -232,6 +232,7 @@ pub struct Ctx<const N: usize> {
     noise: Box<dyn NoiseFn<f64, N>>,
     pub string_table: HashMap<String, u64>,
     pub reverse_string_table: HashMap<u64, String>,
+    pub offset: [u32; N],
     current_activations: u32,
 }
 
@@ -281,6 +282,7 @@ impl Ctx<2> {
             string_table: Default::default(),
             reverse_string_table: Default::default(),
             current_activations: 0,
+            offset: [0; 2],
         }
     }
 }
@@ -296,6 +298,7 @@ impl Ctx<3> {
             string_table: Default::default(),
             reverse_string_table: Default::default(),
             current_activations: 0,
+            offset: [0; 3],
         }
     }
 }
@@ -311,9 +314,11 @@ impl Ctx<4> {
             string_table: Default::default(),
             reverse_string_table: Default::default(),
             current_activations: 0,
+            offset: [0; 4],
         }
     }
 }
+
 
 impl <const N: usize>Ctx<N> {
     pub fn fork_rng(&mut self) -> SmallRng {
@@ -347,6 +352,17 @@ impl <const N: usize>Ctx<N> {
 
     fn modifier_finished(&mut self) {
         self.current_activations = 0;
+    }
+
+    fn sample_noise(&self, mut p: [u32; N], scale: [f64;N]) -> f64 {
+        for n in 0..N {
+            p[n] += self.offset[n];
+        }
+        let mut p = p.map(|v| v as f64 );
+        for n in 0..N {
+            p[n] *= scale[n];
+        }
+        self.noise.get(p)
     }
 }
 
@@ -458,8 +474,8 @@ impl CommonParams {
             if self.tile_prob.val(&mut ctx.rng) < 1.0 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng) {
                 return true
             }
-            let p:[f64; N] = point.map(|v| v as f64 * self.noise_scale.val(&mut ctx.rng));
-            if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.noise.get(p) < self.noise_threshold.val(&mut ctx.rng) {
+            let scale = self.noise_scale.val(&mut ctx.rng);
+            if self.noise_threshold.val(&mut ctx.rng) > f64::NEG_INFINITY && ctx.sample_noise(point, [scale; N]) < self.noise_threshold.val(&mut ctx.rng) {
                 return true
             }
         }
@@ -767,7 +783,7 @@ impl <const N: usize>ModifierImpl<N> for Cellular {
         #[cfg(not(feature = "parallel"))]
         let changed:Vec<_> = {
             let mut neighboors_cache = Vec::with_capacity(3*N-1);
-            indices.into_iter().map(|idx| f(&mut neighboors_cache, idx)).collect()
+            indices.into_iter().filter_map(|idx| f(&mut neighboors_cache, idx)).collect()
         };
         #[cfg(feature = "parallel")]
         let changed: Vec<_> = indices.into_par_iter().map_with(Vec::with_capacity(3*N-1), |neighboors_cache, idx| f(neighboors_cache, idx)).filter_map(|x| x).collect();
@@ -806,8 +822,8 @@ fn scale_value() -> Value { Value::Const(1.0) }
 impl <const N: usize>ModifierImpl<N> for FlowField {
     fn apply(&self, tilemap: &mut TileMap<N>, common_params: &CommonParams, ctx: &mut Ctx<N>) {
         for p in tilemap.points() {
-            let scaled_point = p.map(|v| v as f64 * self.scale.val(&mut ctx.rng) as f64);
-            let a = ctx.noise.get(scaled_point) * std::f64::consts::TAU;
+            let scale = self.scale.val(&mut ctx.rng);
+            let a = ctx.sample_noise(p, [scale; N]) * std::f64::consts::TAU;
             let mut a_tag = Tag::Display(format!("angle_{a}"));
             a_tag.solidify(ctx);
             tilemap.set_tile(p, &self.ty, ctx, common_params, &[a_tag]);
@@ -888,8 +904,6 @@ pub struct Worm {
     trail: TileType,
     #[serde(default="default_worm_radius")]
     radius: Value,
-    #[serde(default)]
-    noise_offset: (Value, Value),
     #[serde(default="value_one")]
     steering_strength_x: Value,
     #[serde(default="value_one")]
@@ -908,7 +922,7 @@ impl <const N: usize>ModifierImpl<N> for Worm {
 
         let mut len = self.len.val(&mut ctx.rng).max(0.0) as u32;
 
-        let mut a = [0; N].map(|_| ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng))) * std::f64::consts::TAU);
+        let mut a = [0; N].map(|_| ctx.sample_noise(current_p.map(|v| v.max(0.0) as u32), [1.0; N]) * std::f64::consts::TAU);
         let radius = self.radius.val(&mut ctx.rng).max(0.0);
         let radius_squared = radius.powi(2);
         let mut neighboors_cache = Vec::with_capacity(3*N-1);
@@ -948,7 +962,7 @@ impl <const N: usize>ModifierImpl<N> for Worm {
                     2 => self.steering_strength_y.val(&mut ctx.rng),
                     _ => self.steering_strength_z.val(&mut ctx.rng),
                 };
-                a[n] += ctx.noise.get(current_p.map(|v| v + self.noise_offset.0.val(&mut ctx.rng) + n as f64 * 1000.0)) * std::f64::consts::TAU * steer_strength;
+                a[n] += ctx.sample_noise(current_p.map(|v| v.max(0.0) as u32 + n as u32 * 1000), [1.0; N]) * std::f64::consts::TAU * steer_strength;
             }
         }
     }
@@ -960,8 +974,6 @@ impl <const N: usize>ModifierImpl<N> for Worm {
         self.len.solidify(ctx);
         self.radius.solidify(ctx);
         self.starting_ty.solidify(ctx);
-        self.noise_offset.0.solidify(ctx);
-        self.noise_offset.1.solidify(ctx);
         self.trail.solidify(ctx);
         for ty in &mut self.impassable {
             ty.solidify(ctx);
