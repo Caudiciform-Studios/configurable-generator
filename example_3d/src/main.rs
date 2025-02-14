@@ -2,15 +2,16 @@ use std::env::args;
 
 use rand::prelude::*;
 
-use configurable_generator::{Generator, TileMap, Ctx, Value};
+use configurable_generator::{Generator, TileMap, Ctx, Value, register_standard_modifiers};
 
 fn main() {
+    register_standard_modifiers();
     let config_path = args().nth(1).unwrap();
     let output_path = args().nth(2).unwrap();
     let input_seed = args().nth(3).and_then(|v| v.parse::<u64>().ok()).clone();
 
 
-    let (mut generator, _watch_paths) = Generator::load::<3>(&config_path).unwrap();
+    let (mut generator, _watch_paths) = Generator::load(&config_path).unwrap();
 
     let seed = if let Some(seed) = input_seed {
         seed
@@ -20,7 +21,7 @@ fn main() {
 
     let mut rng = SmallRng::seed_from_u64(seed);
 
-    let mut ctx = Ctx::<3>::new(&mut rng);
+    let mut ctx = Ctx::new(&mut rng);
     generator.solidify(&mut ctx);
     let map = generator.generate([200,200,70], &mut ctx);
 

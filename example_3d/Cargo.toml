@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-configurable_generator.path = ".."
+configurable_generator = {path="..", default-features=false, features=["parallel", "3d"]}
 rand = "=0.8.5"
 vox_writer = "0.1.9"
 

@@ -1,9 +1,8 @@
 (
     modifiers: [
         {Fill: "empty"},
-        {Fill: "ground", max_z: "30"},
+        {Fill: "ground", max: ["300", "300", "30"]},
 
-        
         {Cellular: (if_ty: "empty", neighbor_ty: ["ground"], threshold: "1", new_ty:"mesa"), noise_threshold: "0", noise_scale:"0.1"},
 
         {Cellular: (if_ty: "empty", neighbor_ty: ["mesa"], threshold: "1", new_ty:"mesa"), tile_prob:"0.5", iterations:"4"},
