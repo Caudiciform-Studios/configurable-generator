@@ -10,12 +10,13 @@ use rand::prelude::*;
 use image::{imageops::{resize, FilterType}, RgbImage};
 use serde::{Serialize, Deserialize};
 
-use configurable_generator::{Generator, TileMap, Ctx, Value};
+use configurable_generator::{Generator, TileMap, Ctx, Value, register_standard_modifiers};
 
 #[derive(Serialize, Deserialize)]
 struct Palette(HashMap<String, [u8;3]>);
 
 fn main() {
+    register_standard_modifiers();
     let config_path = args().nth(1).unwrap();
     let output_path = args().nth(2).unwrap();
     let input_seed = args().nth(3).and_then(|v| v.parse::<u64>().ok()).clone();
@@ -33,7 +34,7 @@ fn main() {
 
     let mut watchers = vec![hotwatch];
 
-    let (mut generator, mut watch_paths) = Generator::load::<2>(&config_path).unwrap();
+    let (mut generator, mut watch_paths) = Generator::load(&config_path).unwrap();
     for path in &watch_paths {
         watchers.push(watch(path, reload_config_tx.clone()));
     }
@@ -54,7 +55,7 @@ fn main() {
             }
         }
         if let Ok(_) = reload_config_rx.try_recv() {
-            match Generator::load::<2>(&config_path) {
+            match Generator::load(&config_path) {
                 Ok((g, new_watch_paths)) => {
                     for p in new_watch_paths {
                         if !watch_paths.contains(&p) {
@@ -91,7 +92,7 @@ fn watch(path: &Path, channel: Arc<Sender<()>>) -> Hotwatch {
     hotwatch
 }
 
-fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap<2>, Ctx<2>) {
+fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap, Ctx) {
     let mut generator = generator.clone();
     let seed = if let Some(seed) = input_seed {
         seed
@@ -101,7 +102,7 @@ fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap<2>, Ctx<
 
     let mut rng = SmallRng::seed_from_u64(seed);
 
-    let mut ctx = Ctx::<2>::new(&mut rng);
+    let mut ctx = Ctx::new(&mut rng);
     generator.solidify(&mut ctx);
     let size = if let Some(size) = generator.default_size {
         size
@@ -112,7 +113,7 @@ fn generate(generator: &Generator, input_seed: Option<u64>) -> (TileMap<2>, Ctx<
     (map, ctx)
 }
 
-fn draw(tilemap: &TileMap<2>, ctx: &Ctx<2>, palette: &Palette) -> RgbImage {
+fn draw(tilemap: &TileMap, ctx: &Ctx, palette: &Palette) -> RgbImage {
     let mut img = RgbImage::from_pixel(tilemap.dimensions[0] as u32, tilemap.dimensions[1] as u32, [255, 0, 0].into());
 
     for (idx, tile) in tilemap.tiles.iter().enumerate() {

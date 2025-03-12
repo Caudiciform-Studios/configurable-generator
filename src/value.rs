@@ -1,16 +1,16 @@
 use std::fmt;
 
-use rand::prelude::*;
-use serde::{Deserializer, Serializer, Deserialize, Serialize, de};
 use lazy_regex::regex_switch;
+use rand::prelude::*;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Ctx;
 
 #[derive(Copy, Clone, Debug)]
 pub enum Value {
     Const(f64),
-    Range(f64,f64),
-    DynamicRange(f64,f64),
+    Range(f64, f64),
+    DynamicRange(f64, f64),
 }
 
 impl Default for Value {
@@ -36,14 +36,11 @@ impl Value {
 }
 
 impl fmt::Display for Value {
-    fn fmt(
-        &self,
-        f: &mut fmt::Formatter,
-    ) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Value::Const(v) => write!(f, "{v}"),
-            Value::Range(s,e) => write!(f, "{s}..{e}"),
-            Value::DynamicRange(s,e) => write!(f, "d{s}..{e}"),
+            Value::Range(s, e) => write!(f, "{s}..{e}"),
+            Value::DynamicRange(s, e) => write!(f, "d{s}..{e}"),
         }
     }
 }
@@ -61,12 +58,18 @@ impl std::str::FromStr for Value {
 }
 
 impl Serialize for Value {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         serializer.collect_str(self)
     }
 }
 impl<'de> Deserialize<'de> for Value {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         <Self as std::str::FromStr>::from_str(&s).map_err(de::Error::custom)
     }
