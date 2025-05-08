@@ -464,6 +464,10 @@ pub struct CommonParams {
     if_level_tag: Option<Tag>,
     #[serde(default)]
     if_not_level_tag: Option<Tag>,
+    #[serde(default)]
+    if_tag: Option<Tag>,
+    #[serde(default)]
+    if_not_tag: Option<Tag>,
 
     #[serde(default)]
     #[cfg(feature = "2d")]
@@ -535,6 +539,16 @@ impl CommonParams {
                     return true;
                 }
             }
+            if let Some(tag) = &self.if_tag {
+                if !tilemap.tile_tags[idx.0].contains(&tag.as_packed()) {
+                    return true;
+                }
+            }
+            if let Some(tag) = &self.if_not_tag {
+                if tilemap.tile_tags[idx.0].contains(&tag.as_packed()) {
+                    return true;
+                }
+            }
             if self.tile_prob.val(&mut ctx.rng) < 1.0
                 && ctx.rng.gen::<f64>() > self.tile_prob.val(&mut ctx.rng)
             {
@@ -569,6 +583,12 @@ impl CommonParams {
             ty.solidify(ctx);
         }
         if let Some(ty) = &mut self.if_not_level_tag {
+            ty.solidify(ctx);
+        }
+        if let Some(ty) = &mut self.if_tag {
+            ty.solidify(ctx);
+        }
+        if let Some(ty) = &mut self.if_not_tag {
             ty.solidify(ctx);
         }
         for tag in &mut self.tile_tags {
@@ -1093,6 +1113,7 @@ pub struct ReplaceBlock {
     tiles: Vec<TileType>,
     old: Vec<Vec<usize>>,
     new: Vec<Vec<usize>>,
+    root: Point,
     #[serde(default)]
     count: Option<Value>,
 }
@@ -1123,15 +1144,13 @@ impl ModifierImpl for ReplaceBlock {
                 }
                 *count -= 1;
             }
-            let mut placed = false;
             for (dy, row) in self.new.iter().enumerate() {
                 for (dx, tile_idx) in row.iter().enumerate() {
                     let tile = &self.tiles[*tile_idx];
                     if tile.as_packed() == any_tile {
                         continue
                     }
-                    if !placed {
-                        placed = true;
+                    if [dx as u32,dy as u32] == self.root {
                         tilemap.set_tile([x+dx as u32,y+dy as u32], tile, ctx, common_params,
                         &[
                             first_tag.clone()
